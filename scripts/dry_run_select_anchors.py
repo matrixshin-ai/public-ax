@@ -15,13 +15,16 @@ ax-vault-full -> public-ax 앵커 후보 1차 dry-run 집계.
 import argparse
 import collections
 import json
+import os
 import re
 import sys
 from pathlib import Path
 
 import yaml
 
-DEFAULT_SOURCE = r"C:\Users\minsi\ax-vault-full\AX뉴스"
+# 공개 저장소이므로 로컬 경로를 코드에 두지 않는다 - --source 또는 이 환경변수로 받는다.
+SOURCE_ENV = "AX_VAULT_SOURCE"
+SOURCE_EXAMPLE = r"C:\path\to\ax-vault-full\AX뉴스"
 
 BASE_FIELDS = ("title", "date", "source", "section", "grade", "industries", "url", "tags")
 NEW_FIELDS = ("region", "loc", "ulsan_score", "core", "tech", "evidence")
@@ -247,16 +250,29 @@ def print_report(stats: dict, limit_ids: int):
 
 
 def main():
+    # -h 도움말·오류 메시지도 한글이 깨지지 않도록 parse_args 전에 설정
+    sys.stdout.reconfigure(encoding="utf-8")
+    sys.stderr.reconfigure(encoding="utf-8")
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--source", default=DEFAULT_SOURCE, help="ax-vault-full의 AX뉴스 폴더")
+    parser.add_argument("--source",
+                        help=f"ax-vault-full의 AX뉴스 폴더. 생략하면 환경변수 {SOURCE_ENV}를 사용 "
+                             f"(예: {SOURCE_ENV}={SOURCE_EXAMPLE})")
     parser.add_argument("--scope", choices=list(SCOPES), default="direct",
                         help="direct=A(기본, 1차 export) / direct-plus=A+B1 / topics=C / all=전체 분석")
     parser.add_argument("--limit-ids", type=int, default=20, help="출력할 후보 anchor_id 개수")
     parser.add_argument("--json", action="store_true", help="JSON 요약으로 출력")
     args = parser.parse_args()
 
-    sys.stdout.reconfigure(encoding="utf-8")
-    source = Path(args.source)
+    source_arg = args.source or os.environ.get(SOURCE_ENV)
+    if not source_arg:
+        sys.exit(
+            "원자료 폴더가 지정되지 않았습니다.\n"
+            f"  --source로 지정하거나 환경변수 {SOURCE_ENV}를 설정하세요.\n"
+            f"  예) python scripts/dry_run_select_anchors.py --source \"{SOURCE_EXAMPLE}\"\n"
+            f"  예) PowerShell: $env:{SOURCE_ENV} = \"{SOURCE_EXAMPLE}\"\n"
+            f"  예) bash:       export {SOURCE_ENV}=\"{SOURCE_EXAMPLE}\""
+        )
+    source = Path(source_arg)
     if not source.is_dir():
         sys.exit(f"source 폴더가 없습니다: {source}")
 
