@@ -1,5 +1,8 @@
 # public-ax 목차
 
+> 원천: `korea-industry-ax` 웹앱 수록 기사 → `ax-vault-full`(private archive) → `public-ax`(공개 앵커 재색인).
+> 자세한 내용은 [README.md](README.md#원천-시스템) 참고.
+
 | 폴더 | 설명 |
 |---|---|
 | [daily/](daily/) | 날짜별 공개 앵커 |
