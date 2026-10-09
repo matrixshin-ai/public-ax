@@ -6,12 +6,17 @@ ax-vault-full -> public-ax daily 앵커 exporter (scope: direct 고정).
 - 기본 실행은 dry-run이다. 파일을 쓰지 않고 건수·생성 예정 경로·anchor_id만 출력한다.
 - --write를 줬을 때만 daily/YYYY-MM-DD.md를 만든다. 같은 날짜 파일이 이미 있으면
   건너뛰고, --overwrite를 함께 줬을 때만 덮어쓴다.
-- daily 파일에는 제목·언론사·날짜·URL·분류값·public-ax tags·private 원문 위치만 쓴다.
-  기사 본문은 읽지도 쓰지도 않는다. 짧은 사실 요약과 울산 AX 관련성은 [미작성]으로 둔다.
-- 콘솔에는 제목·URL·본문을 출력하지 않는다.
+- daily 파일에는 제목·언론사·날짜·URL·분류값·public-ax tags·private 원문 위치와
+  --summaries JSON(generate_direct_anchor_summaries.py가 만든 _work/ preview)의
+  짧은 사실 요약·울산 AX 관련성만 쓴다. 기사 본문은 읽지도 쓰지도 않는다.
+  preview의 review(검토 메모)는 daily 파일에 쓰지 않는다.
+- summaries에 없는 anchor_id가 있으면 중단한다 (--allow-missing-summaries일 때만
+  [미작성]으로 둔다). summary·ulsan_relevance가 빈 값이면 항상 중단한다.
+- 콘솔에는 제목·URL·본문·요약을 출력하지 않는다.
 """
 import argparse
 import collections
+import json
 import os
 import sys
 from pathlib import Path
@@ -22,6 +27,7 @@ import dry_run_select_anchors as selector  # noqa: E402
 SCOPE = "direct"
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DAILY_DIR = REPO_ROOT / "daily"
+DEFAULT_SUMMARIES = "_work/direct_anchor_summaries_preview.json"
 VAULT_PREFIX = "ax-vault-full/AX뉴스"
 PENDING = "[미작성]"
 
@@ -56,6 +62,33 @@ def resolve_source(arg):
     if not source.is_dir():
         sys.exit(f"source 폴더가 없습니다: {source}")
     return source
+
+
+def load_summaries(arg: str, anchors: list, allow_missing: bool):
+    """{anchor_id: {"summary", "ulsan_relevance"}}와 집계. 누락·빈 값이면 sys.exit."""
+    path = Path(arg)
+    if not path.is_absolute() and not path.exists():
+        path = REPO_ROOT / arg  # 저장소 루트 기준 상대경로도 허용
+    if not path.exists():
+        if allow_missing:
+            return {}, {"loaded": 0, "missing": len(anchors), "path": arg}
+        sys.exit(f"summaries 파일이 없습니다: {arg}\n"
+                 "  scripts/generate_direct_anchor_summaries.py로 먼저 만들거나 --allow-missing-summaries를 쓰세요.")
+    data = json.loads(path.read_text(encoding="utf-8"))
+    # review(검토 메모)는 읽지 않는다 - 내부 작업용이며 daily 파일에 쓰지 않는다.
+    by_id = {it.get("anchor_id"): it for it in data.get("items", [])}
+
+    empty = [aid for aid, it in by_id.items()
+             if not str(it.get("summary") or "").strip() or not str(it.get("ulsan_relevance") or "").strip()]
+    if empty:
+        sys.exit(f"summary 또는 ulsan_relevance가 빈 항목이 있습니다: {sorted(empty)}")
+    missing = [a["anchor_id"] for a in anchors if a["anchor_id"] not in by_id]
+    if missing and not allow_missing:
+        sys.exit(f"summaries에 없는 anchor_id {len(missing)}건: {missing}\n"
+                 "  요약을 생성하거나, [미작성]으로 두려면 --allow-missing-summaries를 쓰세요.")
+    summaries = {aid: {"summary": str(it["summary"]).strip(), "ulsan_relevance": str(it["ulsan_relevance"]).strip()}
+                 for aid, it in by_id.items()}
+    return summaries, {"loaded": len(by_id), "missing": len(missing), "path": arg}
 
 
 def build_tags(fm: dict) -> list:
@@ -129,22 +162,25 @@ def render_daily(date: str, anchors: list) -> str:
             f"- industries: {', '.join(a['industries'])}",
             "- tags:",
             *[f"  - {t}" for t in a["tags"]],
-            f"- 짧은 사실 요약: {PENDING}",
-            f"- 울산 AX 관련성: {PENDING}",
+            f"- 짧은 사실 요약: {a.get('summary') or PENDING}",
+            f"- 울산 AX 관련성: {a.get('ulsan_relevance') or PENDING}",
             f"- private 원문 위치: {a['private_path']}",
         ]
     return "\n".join(lines) + "\n"
 
 
-def print_report(anchors: list, by_date: dict, plan: list, write: bool, limit_ids: int):
+def print_report(anchors: list, by_date: dict, plan: list, write: bool, limit_ids: int, summary_stats: dict):
     def table(title, counter):
         print(title)
         for k, v in counter.most_common():
             print(f"  {v:5d}  {k}")
 
     mode = "WRITE" if write else "dry-run (파일을 쓰지 않습니다)"
-    print(f"[{mode}] scope={SCOPE}. 제목·URL·본문은 출력하지 않습니다.\n")
+    print(f"[{mode}] scope={SCOPE}. 제목·URL·본문·요약은 출력하지 않습니다.\n")
     print(f"1. 선택된 anchor 수: {len(anchors)}")
+    filled = sum(1 for a in anchors if a.get("summary"))
+    print(f"   summaries: {summary_stats['path']} - {summary_stats['loaded']}건 로드, "
+          f"누락 {summary_stats['missing']}건, 빈 값 0건, 요약이 채워질 anchor {filled}/{len(anchors)}")
     print(f"2. 생성 예정 daily 파일 수: {len(by_date)}")
     print("3. 날짜별 anchor 수")
     for date in sorted(by_date):
@@ -171,6 +207,10 @@ def main():
                              f"(예: {selector.SOURCE_ENV}={selector.SOURCE_EXAMPLE})")
     parser.add_argument("--write", action="store_true", help="daily/YYYY-MM-DD.md 파일을 실제로 생성 (없으면 dry-run)")
     parser.add_argument("--overwrite", action="store_true", help="--write와 함께: 이미 있는 날짜 파일도 덮어씀")
+    parser.add_argument("--summaries", default=DEFAULT_SUMMARIES,
+                        help=f"요약 preview JSON (기본 {DEFAULT_SUMMARIES})")
+    parser.add_argument("--allow-missing-summaries", action="store_true",
+                        help="summaries에 없는 anchor는 [미작성]으로 둠 (없으면 중단)")
     parser.add_argument("--limit-ids", type=int, default=20, help="출력할 anchor_id 개수")
     args = parser.parse_args()
     if args.overwrite and not args.write:
@@ -178,6 +218,10 @@ def main():
 
     source = resolve_source(args.source)
     anchors = collect_anchors(source)
+    # dry-run에서도 같은 검증을 해서 --write 전에 누락·빈 값을 잡는다.
+    summaries, summary_stats = load_summaries(args.summaries, anchors, args.allow_missing_summaries)
+    for a in anchors:
+        a.update(summaries.get(a["anchor_id"], {}))
     by_date = collections.defaultdict(list)
     for a in anchors:
         by_date[a["date"]].append(a)
@@ -197,7 +241,7 @@ def main():
             status = "덮어씀" if exists else "생성함"
         plan.append((rel, len(by_date[date]), status))
 
-    print_report(anchors, by_date, plan, args.write, args.limit_ids)
+    print_report(anchors, by_date, plan, args.write, args.limit_ids, summary_stats)
 
 
 if __name__ == "__main__":
