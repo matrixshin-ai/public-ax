@@ -20,6 +20,8 @@ ax-vault-full -> public-ax daily 앵커 exporter (scope: direct 고정).
   - 이번 대상 중 preview review가 남은 anchor (--accept-review ID,...로 명시 허용한 것만 통과)
   - 공개 안전성 검사(anchor_safety.py) 실패: 요약·관련성의 원문 복사, 템플릿 밖의 줄(본문
     문장·내부 메모 유입), private 원문 위치 형식 위반·로컬 경로, review 메모 문구
+- --retag: 신규 export 대신, 이미 공개된 daily 블록의 tags 줄만 현재 태그 규칙으로 다시 계산한다.
+  tags 외 줄이 하나라도 달라지면 중단한다. 기본 dry-run, --write일 때만 쓴다.
 - 콘솔에는 제목·URL·본문·요약을 출력하지 않는다. 단 --print-preview를 주면 사람 검토용으로
   이번 대상의 제목·출처·요약·관련성을 출력한다 (URL·본문은 출력하지 않음).
 """
@@ -227,6 +229,82 @@ def append_daily(existing: str, anchors: list):
     return text, len(new), len(anchors) - len(new)
 
 
+TAG_ITEM_RE = re.compile(r"^  - \S+$")
+
+
+def retag_text(text: str, tag_map: dict):
+    """기존 daily 텍스트에서 각 블록의 tags 목록만 tag_map[anchor_id]로 바꾼다.
+    (새 텍스트, [(anchor_id, 이전 tags, 새 tags)], [vault에서 못 찾은 anchor_id])"""
+    out, changes, missing = [], [], []
+    lines = text.split("\n")
+    i, aid = 0, None
+    while i < len(lines):
+        line = lines[i]
+        m = re.match(r"^- 앵커 ID: (\w+)$", line)
+        if m:
+            aid = m.group(1)
+        out.append(line)
+        i += 1
+        if line == "- tags:":
+            old = []
+            while i < len(lines) and TAG_ITEM_RE.match(lines[i]):
+                old.append(lines[i][4:])
+                i += 1
+            new = tag_map.get(aid)
+            if new is None:
+                missing.append(aid)
+                new = old
+            elif new != old:
+                changes.append((aid, old, new))
+            out.extend(f"  - {t}" for t in new)
+    return "\n".join(out), changes, missing
+
+
+def non_tag_lines(text: str) -> list:
+    return [l for l in text.split("\n") if not TAG_ITEM_RE.match(l)]
+
+
+def run_retag(source: Path, args):
+    """--retag: 공개된 daily 블록의 tags 줄만 현재 규칙으로 다시 계산한다. 다른 줄은 바꾸지 않는다."""
+    tag_map = {a["anchor_id"]: a["tags"] for a in collect_anchors(source)}
+    files = [f for f in sorted(DAILY_DIR.glob("????-??-??.md"))
+             if selector.in_date_range(f.stem, args.since, args.on)]
+    planned, all_changes, all_missing, blocking = {}, [], [], []
+    for f in files:
+        old = f.read_text(encoding="utf-8")
+        new, changes, missing = retag_text(old, tag_map)
+        all_missing += missing
+        if not changes:
+            continue
+        # 안전장치: tags 줄을 뺀 나머지는 한 글자도 달라지면 안 된다.
+        if non_tag_lines(old) != non_tag_lines(new):
+            blocking.append(f"daily/{f.name}: tags 외 줄이 바뀜")
+        blocking += [f"daily/{f.name} {p}" for p in safety.daily_text_problems(new)]
+        planned[f] = new
+        all_changes += [(f.stem, *c) for c in changes]
+
+    mode = "WRITE" if args.write else "dry-run (파일을 쓰지 않습니다)"
+    print(f"[{mode}] --retag: 공개된 daily 블록의 tags 줄만 다시 계산합니다.\n")
+    print(f"대상 daily 파일: {len(files)}개 / tags가 바뀌는 앵커: {len(all_changes)}건 / 바뀌는 파일: {len(planned)}개")
+    for date, aid, old, new in all_changes:
+        print(f"  {date} {aid}\n     전: {', '.join(old)}\n     후: {', '.join(new)}")
+    if all_missing:
+        print(f"vault에서 찾지 못해 그대로 둔 앵커: {all_missing}")
+    if blocking:
+        print("중단 사유:")
+        for b in blocking:
+            print(f"  - {b}")
+        if args.write:
+            sys.exit("중단: 아무 파일도 쓰지 않았습니다.")
+        return
+    print("검사: 통과 (tags 외 줄 변경 없음, 공개 안전성 문제 없음)")
+    if args.write:
+        for f, text in planned.items():
+            f.write_text(text, encoding="utf-8", newline="\n")
+        print(f"쓰기 완료: {len(planned)}개 파일의 tags 줄을 갱신했습니다. "
+              "anchor 수는 그대로라 index.md·README.md는 바꾸지 않습니다.")
+
+
 def daily_counts(texts: dict) -> dict:
     """{date: anchor_count} - texts는 {date: daily 파일 내용}."""
     return {d: int(ANCHOR_COUNT_RE.search(t).group(1)) for d, t in texts.items()}
@@ -350,10 +428,16 @@ def main():
                         help="review가 남아 있어도 통과시킬 anchor_id (쉼표로 구분, 사람이 확인한 것만)")
     parser.add_argument("--print-preview", action="store_true",
                         help="사람 검토용으로 이번 대상의 제목·출처·요약·관련성을 출력 (URL·본문 제외)")
+    parser.add_argument("--retag", action="store_true",
+                        help="신규 export 대신, 이미 공개된 daily 블록의 tags 줄만 현재 규칙으로 다시 계산 "
+                             "(--since/--date로 파일 범위 지정, --write일 때만 씀)")
     parser.add_argument("--limit-ids", type=int, default=20, help="출력할 anchor_id 개수")
     args = parser.parse_args()
 
     source = resolve_source(args.source)
+    if args.retag:
+        run_retag(source, args)
+        return
     published = selector.published_anchor_ids()
     exclude = frozenset() if args.include_published else frozenset(published)
     anchors = collect_anchors(source, args.since, args.on, exclude)

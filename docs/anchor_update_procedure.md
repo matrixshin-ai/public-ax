@@ -34,6 +34,7 @@ $env:AX_VAULT_SOURCE = "C:\path\to\ax-vault-full\AX뉴스"
 $env:AX_SUMMARY_MODEL = "claude-sonnet-5-5"   # 예: 다른 모델로 바꿀 때
 ```
 - `--date YYYY-MM-DD`를 쓰면 그 날짜만 처리합니다.
+- 태그 규칙을 바꾼 뒤 이미 공개된 앵커에도 반영하려면 `python scripts/export_direct_anchors.py --retag`로 바뀌는 tags를 확인하고, `--write`를 붙여 반영합니다 (tags 줄만 바뀌며, 다른 줄이 달라지면 중단).
 
 ## 스크립트가 막는 것
 
