@@ -9,6 +9,8 @@ ax-vault-full -> public-ax 앵커 후보 1차 dry-run 집계.
   > C(AX 핵심기술) > D(기타) 순으로 분류한다.
 - --scope로 선택 범위를 정한다: direct(기본, A - 1차 export 대상) / direct-plus(A+B1,
   2차 검토) / topics(C, topic 문서 후보 분석) / all(A+B1+B2+C+D, 전체 분석).
+- 신규 갱신용: public-ax daily/에 이미 있는 anchor_id는 기본으로 뺀다(--include-published로
+  포함). --since YYYY-MM-DD(그 날짜 이후) / --date YYYY-MM-DD(그 날짜만)로 범위를 좁힌다.
 - 출력은 건수와 anchor_id(파일명 끝 8자리 해시)뿐이다. 제목·URL·본문·요약은
   출력하지 않으며, 어떤 파일도 쓰지 않는다.
 """
@@ -31,6 +33,10 @@ NEW_FIELDS = ("region", "loc", "ulsan_score", "core", "tech", "evidence")
 
 ANCHOR_ID_RE = re.compile(r"_([0-9a-f]{8})\.md$")
 DATE_RE = re.compile(r"(\d{4}-\d{2}-\d{2})")
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+DAILY_DIR = REPO_ROOT / "daily"
+PUBLISHED_ID_RE = re.compile(r"^- 앵커 ID: ([0-9a-f]{8})\s*$", re.M)
 
 # --- 제목 키워드 (그룹별) -------------------------------------------------
 # A: 울산 직접 - 지역명 + 울산 소재 기관
@@ -113,6 +119,37 @@ def normalize_date(value, path: Path) -> str:
     return m.group(1) if m else "unknown"
 
 
+def published_anchor_ids(daily_dir: Path = DAILY_DIR) -> set:
+    """public-ax daily/*.md에 이미 공개된 anchor_id."""
+    ids = set()
+    for f in sorted(daily_dir.glob("*.md")):
+        ids.update(PUBLISHED_ID_RE.findall(f.read_text(encoding="utf-8")))
+    return ids
+
+
+def iso_date(value: str) -> str:
+    """argparse type: YYYY-MM-DD만 허용."""
+    if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", value or ""):
+        raise argparse.ArgumentTypeError(f"YYYY-MM-DD 형식이어야 합니다: {value}")
+    return value
+
+
+def in_date_range(date: str, since: str = None, on: str = None) -> bool:
+    if on and date != on:
+        return False
+    if since and date < since:
+        return False
+    return True
+
+
+def add_range_args(parser):
+    """세 스크립트 공통 옵션: --since / --date / --include-published."""
+    parser.add_argument("--since", type=iso_date, help="이 날짜(YYYY-MM-DD) 이후 기사만")
+    parser.add_argument("--date", dest="on", type=iso_date, help="이 날짜(YYYY-MM-DD) 기사만")
+    parser.add_argument("--include-published", action="store_true",
+                        help="public-ax daily/에 이미 있는 anchor_id도 포함 (기본: 제외, 신규만)")
+
+
 def title_hits(title_n: str, keywords) -> bool:
     return any(norm(k) in title_n for k in keywords)
 
@@ -162,12 +199,16 @@ def classify(fm: dict):
     return group, reasons
 
 
-def run(source: Path, scope: str) -> dict:
+def run(source: Path, scope: str, since: str = None, on: str = None, exclude_ids=frozenset()) -> dict:
     files = sorted(source.rglob("*.md"))
     selected_groups = SCOPES[scope]
     stats = {
         "scope": scope,
+        "since": since,
+        "date": on,
         "total_md": len(files),
+        "in_range": 0,
+        "excluded_published": 0,
         "base_only": 0,
         "with_new_fields": 0,
         "no_frontmatter": 0,
@@ -188,6 +229,10 @@ def run(source: Path, scope: str) -> dict:
         if not fm:
             stats["no_frontmatter"] += 1
             continue
+        date = normalize_date(fm.get("date"), path)
+        if not in_date_range(date, since, on):
+            continue
+        stats["in_range"] += 1
         if any(k in fm for k in NEW_FIELDS):
             stats["with_new_fields"] += 1
         else:
@@ -198,11 +243,13 @@ def run(source: Path, scope: str) -> dict:
             continue
         m = ANCHOR_ID_RE.search(path.name)
         anchor_id = m.group(1) if m else "no-id"
-        date = normalize_date(fm.get("date"), path)
 
         stats["candidates"] += 1
         stats["by_group"][group] += 1
         if group not in selected_groups:
+            continue
+        if anchor_id in exclude_ids:
+            stats["excluded_published"] += 1
             continue
         stats["selected"] += 1
         stats["by_date"][date] += 1
@@ -228,12 +275,14 @@ def print_report(stats: dict, limit_ids: int):
     scope = stats["scope"]
     print("[dry-run] 파일을 쓰지 않습니다. 제목·URL·본문은 출력하지 않습니다.\n")
     print(f"1. scope: {scope} (선택 그룹: {', '.join(g for g in GROUP_LABELS if g in SCOPES[scope])})")
-    print(f"2. 전체 md 파일 수: {stats['total_md']}"
+    rng = f"date={stats['date']}" if stats["date"] else (f"since={stats['since']}" if stats["since"] else "전체 기간")
+    print(f"2. 전체 md 파일 수: {stats['total_md']} / 기간({rng}) 안: {stats['in_range']}"
           f"  (기존 8개 필드만 {stats['base_only']} / 신규 필드 포함 {stats['with_new_fields']})")
     if stats["no_frontmatter"]:
         print(f"   (frontmatter를 읽지 못한 파일: {stats['no_frontmatter']})")
     print(f"3. 전체 후보 수: {stats['candidates']}")
-    print(f"4. scope 적용 후 선택 수: {stats['selected']}")
+    print(f"4. scope 적용 후 선택 수: {stats['selected']}"
+          f"  (이미 public-ax에 있어 제외: {stats['excluded_published']})")
     print("5. 그룹별 전체 후보 수 (* = 이번 scope에 포함)")
     for g, label in GROUP_LABELS.items():
         mark = "*" if g in SCOPES[scope] else " "
@@ -259,6 +308,7 @@ def main():
                              f"(예: {SOURCE_ENV}={SOURCE_EXAMPLE})")
     parser.add_argument("--scope", choices=list(SCOPES), default="direct",
                         help="direct=A(기본, 1차 export) / direct-plus=A+B1 / topics=C / all=전체 분석")
+    add_range_args(parser)
     parser.add_argument("--limit-ids", type=int, default=20, help="출력할 후보 anchor_id 개수")
     parser.add_argument("--json", action="store_true", help="JSON 요약으로 출력")
     args = parser.parse_args()
@@ -276,7 +326,8 @@ def main():
     if not source.is_dir():
         sys.exit(f"source 폴더가 없습니다: {source}")
 
-    stats = run(source, args.scope)
+    exclude = frozenset() if args.include_published else frozenset(published_anchor_ids())
+    stats = run(source, args.scope, args.since, args.on, exclude)
     if args.json:
         out = {k: (dict(v) if isinstance(v, collections.Counter) else v) for k, v in stats.items()}
         out["candidate_ids"] = stats["candidate_ids"][:args.limit_ids]

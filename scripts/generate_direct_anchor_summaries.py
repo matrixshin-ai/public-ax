@@ -1,37 +1,47 @@
 """
-direct 앵커 67건의 "짧은 사실 요약"과 "울산 AX 관련성"을 Claude API로 생성해
+direct 앵커의 "짧은 사실 요약"과 "울산 AX 관련성"을 Claude API로 생성해
 비공개 검토용 preview JSON(_work/direct_anchor_summaries_preview.json)에 저장한다.
 
-- 후보 선별은 export_direct_anchors.py(→ dry_run_select_anchors.py)의 direct 로직을 쓴다.
+- 대상: export_direct_anchors.py와 같은 direct 후보. 기본으로 public-ax daily/에 이미 있는
+  anchor_id는 빼고 신규만 처리한다 (--include-published로 포함). --since / --date로 범위 지정.
 - 각 기사 md의 frontmatter와 본문을 읽지만, 본문은 모델 입력에만 쓰고 콘솔에 출력하지 않는다.
   콘솔에는 건수·anchor_id·검사 결과만 나온다 (제목·URL·본문·생성 요약 출력 금지).
-- 생성 결과는 자동 검사한다: 문장 수·길이, 원문과 연속으로 겹치는 구간 길이(복사 방지),
-  관련성 라벨. 기준을 못 넘으면 사유를 알려주고 다시 생성한다 (최대 --max-attempts회).
-  그래도 남은 문제는 preview의 review 항목에 anchor_id별로 기록한다.
-- 이미 preview에 있는 anchor_id는 건너뛴다 (--regenerate로 전부 다시 생성).
-  한 건 끝날 때마다 저장하므로 중간에 멈춰도 이어서 실행할 수 있다.
+- 생성 결과는 anchor_safety.py 기준으로 자동 검사한다: 문장 수·길이, 원문과 연속으로 겹치는
+  구간 길이(복사 방지), 관련성 라벨. 기준을 못 넘으면 사유를 알려주고 다시 생성한다
+  (최대 --max-attempts회). 그래도 남은 문제는 preview의 review에 anchor_id별로 기록한다.
+  export_direct_anchors.py는 review가 남은 anchor가 있으면 쓰기를 거부한다.
+- preview는 누적 파일이다. 이미 있는 anchor_id는 건너뛰고(--regenerate로 다시 생성),
+  이번 대상이 아닌 기존 항목도 지우지 않는다. 한 건 끝날 때마다 저장한다.
 - public daily 파일은 만들지 않는다. _work/는 .gitignore 대상이다.
 
 인증: ANTHROPIC_API_KEY 환경변수 (또는 Anthropic SDK가 읽는 다른 인증 방식).
+모델: --model > 환경변수 AX_SUMMARY_MODEL > 기본 claude-sonnet-5.
 """
 import argparse
-import difflib
 import json
-import re
+import os
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import anchor_safety as safety  # noqa: E402
 import export_direct_anchors as exporter  # noqa: E402
 
 PREVIEW_PATH = exporter.REPO_ROOT / "_work" / "direct_anchor_summaries_preview.json"
-DEFAULT_MODEL = "claude-opus-5-5"
+# 모델 우선순위: --model > 환경변수 AX_SUMMARY_MODEL > DEFAULT_MODEL (코드 수정 없이 바꿀 수 있게)
+MODEL_ENV = "AX_SUMMARY_MODEL"
+DEFAULT_MODEL = "claude-sonnet-5"
+# 서버측 refusal fallback(fallbacks="default")을 받는 모델만 그 파라미터를 보낸다.
+FALLBACK_MODELS = {"claude-fable-5-1", "claude-opus-5-5", "claude-opus-5", "claude-sonnet-5-5"}
 
 RELEVANCE_LABELS = ("울산 직접 관련", "울산 정책 참고사례")
-SUMMARY_MAX_CHARS = 200
-RELEVANCE_MAX_CHARS = 150
-COPY_MAX_RUN = 30  # 원문과 연속으로 같은 글자 수(공백 정규화 후)가 이 값 이상이면 복사로 본다
+RELEVANCE_REASON_MAX_CHARS = 100
+
+# 공용 검사 함수 (예전 이름 유지 - 다른 도구가 import해서 씀)
+read_body = safety.read_body
+longest_copy_run = safety.longest_copy_run
+COPY_MAX_RUN = safety.COPY_MAX_RUN
 
 SYSTEM_PROMPT = """당신은 공개 뉴스 색인 저장소 public-ax의 앵커 작성자입니다. 독자는 울산 산업 AX(AI 전환) 정책 담당자와 자문 전문가이고, 이 색인은 원문 기사를 찾아가기 위한 출발점입니다. 기사 전문을 대신하는 문서가 아닙니다.
 
@@ -65,56 +75,17 @@ OUTPUT_SCHEMA = {
 }
 
 
-def read_body(path: Path) -> str:
-    """frontmatter 뒤의 본문. export_to_vault.py가 쓰는 '# 제목'과 '출처:' 줄은 뺀다
-    (제목·URL은 frontmatter로 따로 넘기고, 복사 검사도 기사 본문만 대상으로 한다)."""
-    text = path.read_text(encoding="utf-8", errors="replace")
-    if text.startswith("---"):
-        end = text.find("\n---", 3)
-        text = text[end + 4:] if end != -1 else text
-    lines = [l for l in text.splitlines() if not l.startswith("# ") and not l.startswith("출처:")]
-    return "\n".join(lines).strip()
-
-
-def squash(s: str) -> str:
-    return re.sub(r"\s+", " ", s).strip()
-
-
-def longest_copy_run(generated: str, body: str) -> int:
-    a, b = squash(body), squash(generated)
-    if not a or not b:
-        return 0
-    m = difflib.SequenceMatcher(None, a, b, autojunk=False).find_longest_match(0, len(a), 0, len(b))
-    return m.size
-
-
-def sentence_count(s: str) -> int:
-    return len([p for p in re.split(r"(?<=[.!?。])\s+", s.strip()) if p])
-
-
 def check(result: dict, body: str) -> list:
     """검사 실패 사유 목록 (빈 목록이면 통과)."""
-    problems = []
     summary = (result.get("summary") or "").strip()
     reason = (result.get("relevance_reason") or "").strip()
-    if not summary:
-        problems.append("summary가 비어 있음")
-    if not reason:
-        problems.append("relevance_reason이 비어 있음")
+    problems = safety.text_problems(summary, reason, body)
     if result.get("relevance_type") not in RELEVANCE_LABELS:
         problems.append("relevance_type이 허용값이 아님")
-    if summary and sentence_count(summary) > 2:
-        problems.append(f"summary가 {sentence_count(summary)}문장 (최대 2문장)")
-    if len(summary) > SUMMARY_MAX_CHARS:
-        problems.append(f"summary가 {len(summary)}자 (최대 {SUMMARY_MAX_CHARS}자)")
-    if reason and sentence_count(reason) > 1:
-        problems.append(f"relevance_reason이 {sentence_count(reason)}문장 (1문장이어야 함)")
-    if len(reason) > RELEVANCE_MAX_CHARS:
-        problems.append(f"relevance_reason이 {len(reason)}자 (최대 {RELEVANCE_MAX_CHARS}자)")
-    for name, text in (("summary", summary), ("relevance_reason", reason)):
-        run = longest_copy_run(text, body)
-        if run >= COPY_MAX_RUN:
-            problems.append(f"{name}가 원문과 {run}자 연속으로 같음 (최대 {COPY_MAX_RUN - 1}자) - 자기 문장으로 다시 쓸 것")
+    if reason and safety.sentence_count(reason) > 1:
+        problems.append(f"relevance_reason이 {safety.sentence_count(reason)}문장 (1문장이어야 함)")
+    if len(reason) > RELEVANCE_REASON_MAX_CHARS:
+        problems.append(f"relevance_reason이 {len(reason)}자 (최대 {RELEVANCE_REASON_MAX_CHARS}자)")
     return problems
 
 
@@ -136,17 +107,18 @@ def call_model(client, model: str, effort: str, user_message: str):
     """(result dict | None, 실패 사유 | None)"""
     import anthropic
 
+    params = dict(
+        model=model,
+        max_tokens=16000,
+        system=SYSTEM_PROMPT,
+        messages=[{"role": "user", "content": user_message}],
+        output_config={"effort": effort, "format": {"type": "json_schema", "schema": OUTPUT_SCHEMA}},
+    )
+    if model in FALLBACK_MODELS:
+        # 안전 분류기가 거절하면 서버가 거절 범주에 맞는 모델로 같은 요청을 다시 실행한다.
+        params.update(betas=["server-side-fallback-2026-07-01"], fallbacks="default")
     try:
-        response = client.beta.messages.create(
-            model=model,
-            max_tokens=16000,
-            system=SYSTEM_PROMPT,
-            messages=[{"role": "user", "content": user_message}],
-            output_config={"effort": effort, "format": {"type": "json_schema", "schema": OUTPUT_SCHEMA}},
-            # 안전 분류기가 거절하면 서버가 거절 범주에 맞는 모델로 같은 요청을 다시 실행한다.
-            betas=["server-side-fallback-2026-07-01"],
-            fallbacks="default",
-        )
+        response = client.beta.messages.create(**params)
     except anthropic.BadRequestError as e:
         return None, f"요청 오류 400: {e.message}"
     except anthropic.AuthenticationError:
@@ -174,17 +146,19 @@ def load_preview() -> dict:
     return {}
 
 
-def save_preview(items: dict, review: dict, order: list, model: str):
+def save_preview(items: dict, review: dict, model: str):
+    """누적 저장: 이번 실행 대상이 아닌 기존 항목도 그대로 둔다."""
+    ordered = sorted(items)
     data = {
         "source_system": "korea-industry-ax",
         "source_vault": "ax-vault-full",
         "scope": exporter.SCOPE,
-        "anchor_count": len(order),
+        "anchor_count": len(items),
         "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "model": model,
-        "items": [items[aid] for aid in order if aid in items],
+        "items": [items[aid] for aid in ordered],
         # anchor_id -> 재시도 후에도 남은 검사 실패 사유 (사람 검토 필요)
-        "review": {aid: review[aid] for aid in order if review.get(aid)},
+        "review": {aid: review[aid] for aid in ordered if review.get(aid)},
     }
     PREVIEW_PATH.parent.mkdir(exist_ok=True)
     tmp = PREVIEW_PATH.with_suffix(".json.tmp")
@@ -199,7 +173,9 @@ def main():
     parser.add_argument("--source",
                         help=f"ax-vault-full의 AX뉴스 폴더. 생략하면 환경변수 {exporter.selector.SOURCE_ENV}를 사용 "
                              f"(예: {exporter.selector.SOURCE_ENV}={exporter.selector.SOURCE_EXAMPLE})")
-    parser.add_argument("--model", default=DEFAULT_MODEL, help=f"Claude 모델 (기본 {DEFAULT_MODEL})")
+    exporter.selector.add_range_args(parser)
+    parser.add_argument("--model", default=os.environ.get(MODEL_ENV) or DEFAULT_MODEL,
+                        help=f"Claude 모델. 생략하면 환경변수 {MODEL_ENV}, 그것도 없으면 {DEFAULT_MODEL}")
     parser.add_argument("--effort", default="medium", choices=["low", "medium", "high", "xhigh", "max"],
                         help="output_config.effort (기본 medium)")
     parser.add_argument("--max-attempts", type=int, default=3, help="검사 실패 시 anchor당 최대 생성 횟수")
@@ -210,19 +186,30 @@ def main():
     args = parser.parse_args()
 
     source = exporter.resolve_source(args.source)
-    anchors = exporter.collect_anchors(source)
+    exclude = frozenset() if args.include_published else frozenset(exporter.selector.published_anchor_ids())
+    anchors = exporter.collect_anchors(source, args.since, args.on, exclude)
     if args.limit:
         anchors = anchors[:args.limit]
-    order = [a["anchor_id"] for a in anchors]
     paths = {p.name: p for p in source.rglob("*.md")}
-    bodies = {a["anchor_id"]: read_body(paths[Path(a["private_path"]).name]) for a in anchors}
+    bodies = {a["anchor_id"]: safety.read_body(paths[Path(a["private_path"]).name]) for a in anchors}
+
+    previous = load_preview()
+    items = {it["anchor_id"]: it for it in previous.get("items", [])}
+    review = dict(previous.get("review", {}))
+    todo = [a for a in anchors if args.regenerate or a["anchor_id"] not in items]
 
     print("[preview 생성] 제목·URL·본문·생성 요약은 출력하지 않습니다.")
-    print(f"대상 anchor 수: {len(anchors)}")
+    rng = f"date={args.on}" if args.on else (f"since={args.since}" if args.since else "전체 기간")
+    print(f"대상 anchor 수: {len(anchors)}  ({rng}, 이미 public-ax에 있는 {len(exclude)}건 제외 기준)")
+    print(f"preview에 이미 있음: {len(anchors) - len(todo)}  /  새로 생성할 anchor: {len(todo)}")
+    print(f"모델: {args.model}, effort: {args.effort}")
     empty_bodies = [aid for aid, b in bodies.items() if not b]
     print(f"본문이 비어 있는 anchor: {len(empty_bodies)}" + (f" {empty_bodies}" if empty_bodies else ""))
     if args.check_only:
         print("--check-only: API를 호출하지 않았습니다. preview 파일은 바뀌지 않았습니다.")
+        return
+    if not todo:
+        print("새로 생성할 anchor가 없습니다.")
         return
 
     import anthropic
@@ -231,17 +218,11 @@ def main():
         client = anthropic.Anthropic(max_retries=4)
     except anthropic.AnthropicError as e:
         sys.exit(f"Anthropic 클라이언트를 만들 수 없습니다 (인증 정보 확인): {e}")
+    print()
 
-    previous = {} if args.regenerate else load_preview()
-    items = {it["anchor_id"]: it for it in previous.get("items", []) if it.get("anchor_id") in order}
-    review = {k: v for k, v in previous.get("review", {}).items() if k in items}
-    print(f"이미 생성된 anchor (건너뜀): {len(items)}  |  모델: {args.model}, effort: {args.effort}\n")
-
-    counts = {"ok": 0, "review": 0, "failed": 0, "skipped": len(items)}
-    for n, anchor in enumerate(anchors, 1):
+    counts = {"ok": 0, "review": 0, "failed": 0}
+    for n, anchor in enumerate(todo, 1):
         aid = anchor["anchor_id"]
-        if aid in items:
-            continue
         body = bodies[aid]
         problems, result, attempts = [], None, 0
         while attempts < args.max_attempts:
@@ -250,7 +231,7 @@ def main():
                 candidate, error = call_model(client, args.model, args.effort,
                                               build_user_message(anchor, body, problems))
             except anthropic.AuthenticationError:
-                save_preview(items, review, order, args.model)
+                save_preview(items, review, args.model)
                 sys.exit("인증 실패: ANTHROPIC_API_KEY를 확인하세요. 지금까지 결과는 저장했습니다.")
             if error:
                 problems = [error]
@@ -263,7 +244,8 @@ def main():
         if result is None:
             counts["failed"] += 1
             review[aid] = problems
-            print(f"  [{n:2d}/{len(anchors)}] {aid}  실패 ({attempts}회): {'; '.join(problems)}")
+            print(f"  [{n:2d}/{len(todo)}] {aid}  실패 ({attempts}회): {'; '.join(problems)}")
+            save_preview(items, review, args.model)
             continue
         items[aid] = {
             "anchor_id": aid,
@@ -278,19 +260,18 @@ def main():
             review.pop(aid, None)
             counts["ok"] += 1
             status = f"통과 ({attempts}회)"
-        print(f"  [{n:2d}/{len(anchors)}] {aid}  {status}")
-        save_preview(items, review, order, args.model)
+        print(f"  [{n:2d}/{len(todo)}] {aid}  {status}")
+        save_preview(items, review, args.model)
 
-    save_preview(items, review, order, args.model)
     saved = load_preview()
-    labels = {lbl: sum(1 for it in saved["items"] if it["ulsan_relevance"].startswith(lbl)) for lbl in RELEVANCE_LABELS}
-    print("\n결과")
-    print(f"  통과 {counts['ok']} / 검토 필요 {counts['review']} / 실패 {counts['failed']} / 기존 건너뜀 {counts['skipped']}")
-    print(f"  preview items: {len(saved['items'])} / 대상 {len(order)}")
-    print(f"  summary 빈 항목: {sum(1 for it in saved['items'] if not it['summary'])}")
-    print(f"  ulsan_relevance 빈 항목: {sum(1 for it in saved['items'] if not it['ulsan_relevance'])}")
+    target = {a["anchor_id"] for a in anchors}
+    mine = [it for it in saved["items"] if it["anchor_id"] in target]
+    labels = {lbl: sum(1 for it in mine if it["ulsan_relevance"].startswith(lbl)) for lbl in RELEVANCE_LABELS}
+    print("\n결과 (이번 대상 기준)")
+    print(f"  통과 {counts['ok']} / 검토 필요 {counts['review']} / 실패 {counts['failed']}")
+    print(f"  preview에 있는 대상 items: {len(mine)} / 대상 {len(target)}  (preview 전체 {len(saved['items'])}건)")
     print(f"  관련성 라벨: " + ", ".join(f"{k} {v}" for k, v in labels.items()))
-    print(f"  검토 필요 anchor: {sorted(saved['review']) or '없음'}")
+    print(f"  검토 필요 anchor: {sorted(k for k in saved['review'] if k in target) or '없음'}")
     print(f"  저장: {PREVIEW_PATH.relative_to(exporter.REPO_ROOT).as_posix()}")
 
 
