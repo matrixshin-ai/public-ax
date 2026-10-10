@@ -7,7 +7,7 @@
 - 이 저장소는 [korea-industry-ax](https://korea-industry-ax.vercel.app) 웹앱에 수록된 기사 중 **Q&A와 정책분석에 필요한 공개 가능한 앵커만 재색인**합니다.
 - `ax-vault-full` 전체를 공개하는 저장소가 아닙니다. 원자료는 비공개 archive인 **`ax-vault-full`** 에 보관되며, 이 저장소에는 기사 전문이 들어가지 않습니다.
 - ChatGPT Q&A가 GitHub에서 먼저 검색할 수 있는 **공개 검색지도** 역할을 합니다.
-- 운영 현황: 초기 direct daily anchors 12 files, 67 anchors (2026-09-25 ~ 2026-10-08) — [일자별 앵커 목록](index.md#일자별-앵커)
+- 운영 현황: direct daily anchors 14 files, 69 anchors (2026-09-25 ~ 2026-10-10) — [일자별 앵커 목록](index.md#일자별-앵커)
 
 ## 원천 시스템
 
