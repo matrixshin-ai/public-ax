@@ -184,9 +184,13 @@ def classify(fm: dict):
     if not reasons:
         return None, []
 
+    # 웹앱이 다른 시·도 기사로 판정한 경우(신규 필드 region == 타지자체)는 제목에 주력산업
+    # 단어가 있어도 B1(울산 주력산업·기업)로 보지 않는다 - 예: "광주·전남 ... 에너지" 기사.
+    other_region = region == "타지자체"
+
     if t_ulsan or region_match or score_match:
         group = "A"
-    elif t_industry or core_match:
+    elif (t_industry or core_match) and not other_region:
         group = "B1"
     elif ind_match:
         # 제목에 주력산업·기업 키워드 없이 industries 값으로 B가 된 경우 - 타 지역 기사가

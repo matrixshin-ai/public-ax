@@ -49,7 +49,14 @@ TAG_KEYWORDS = [
     "조선", "자동차", "석유화학", "화학", "에너지", "수소", "배터리", "데이터센터", "AIDC",
     "제조AX", "산업AX", "제조AI", "피지컬AI", "디지털트윈", "자율제조", "스마트팩토리", "로봇",
     "인재양성", "정책", "기업현장", "기술인프라",
+    "AI대전환", "중소기업",
 ]
+# 태그 하나를 여러 표현으로 찾는다 (공백·가운뎃점은 norm()이 지우므로 붙여 쓴 형태로 적는다).
+TAG_ALIASES = {
+    "AI대전환": ["AI대전환", "AX대전환", "인공지능대전환"],
+    "중소기업": ["중소기업", "중소·중견", "중견기업", "협력사"],
+    "제조AX": ["제조AX", "제조AI전환"],
+}
 SECTION_TAGS = {
     "정책·생태계·인재": "정책",
     "기업·현장": "기업현장",
@@ -113,11 +120,15 @@ def load_summaries(arg: str, anchors: list, allow_missing: bool):
 
 
 def build_tags(fm: dict) -> list:
-    haystack = [selector.norm(fm.get("title") or ""), selector.norm(fm.get("section") or "")]
+    """title·section·industries와, 있으면 웹앱 분류 필드 tech·evidence(모델이 쓴 20자 안팎 근거)에서
+    태그를 찾는다. 기사 본문은 보지 않는다."""
+    haystack = [selector.norm(fm.get("title") or ""), selector.norm(fm.get("section") or ""),
+                selector.norm(fm.get("evidence") or "")]
     haystack += [selector.norm(i) for i in selector.as_list(fm.get("industries"))]
+    haystack += [selector.norm(t) for t in selector.as_list(fm.get("tech"))]
     tags = ["울산"]
     for kw in TAG_KEYWORDS:
-        if any(selector.norm(kw) in h for h in haystack):
+        if any(selector.norm(alias) in h for alias in TAG_ALIASES.get(kw, [kw]) for h in haystack):
             tags.append(kw)
     section_tag = SECTION_TAGS.get(fm.get("section"))
     if section_tag:
