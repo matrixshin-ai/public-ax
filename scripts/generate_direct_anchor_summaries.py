@@ -75,18 +75,25 @@ OUTPUT_SCHEMA = {
 }
 
 
-def check(result: dict, body: str) -> list:
-    """검사 실패 사유 목록 (빈 목록이면 통과)."""
+def check_issues(result: dict, body: str) -> list:
+    """검사 실패 [(코드, 필드, 메시지)] (빈 목록이면 통과)."""
     summary = (result.get("summary") or "").strip()
     reason = (result.get("relevance_reason") or "").strip()
-    problems = safety.text_problems(summary, reason, body)
+    issues = safety.text_issues(summary, reason, body)
     if result.get("relevance_type") not in RELEVANCE_LABELS:
-        problems.append("relevance_type이 허용값이 아님")
+        issues.append(("RELEVANCE_LABEL", "relevance", "relevance_type이 허용값이 아님"))
     if reason and safety.sentence_count(reason) > 1:
-        problems.append(f"relevance_reason이 {safety.sentence_count(reason)}문장 (1문장이어야 함)")
+        issues.append(("TOO_MANY_SENTENCES", "relevance",
+                       f"relevance_reason이 {safety.sentence_count(reason)}문장 (1문장이어야 함)"))
     if len(reason) > RELEVANCE_REASON_MAX_CHARS:
-        problems.append(f"relevance_reason이 {len(reason)}자 (최대 {RELEVANCE_REASON_MAX_CHARS}자)")
-    return problems
+        issues.append(("TOO_LONG", "relevance",
+                       f"relevance_reason이 {len(reason)}자 (최대 {RELEVANCE_REASON_MAX_CHARS}자)"))
+    return issues
+
+
+def check(result: dict, body: str) -> list:
+    """검사 실패 사유 목록 (빈 목록이면 통과)."""
+    return [msg for _, _, msg in check_issues(result, body)]
 
 
 def build_user_message(anchor: dict, body: str, problems: list) -> str:
@@ -105,6 +112,13 @@ def build_user_message(anchor: dict, body: str, problems: list) -> str:
 
 def call_model(client, model: str, effort: str, user_message: str):
     """(result dict | None, 실패 사유 | None)"""
+    result, error = call_model_coded(client, model, effort, user_message)
+    return result, (error[1] if error else None)
+
+
+def call_model_coded(client, model: str, effort: str, user_message: str):
+    """(result dict | None, (사유 코드, 메시지) | None). 메시지는 API 오류 원문을 담을 수 있으므로
+    공개 로그(auto_publish.py)에는 코드만 쓴다."""
     import anthropic
 
     params = dict(
@@ -120,24 +134,27 @@ def call_model(client, model: str, effort: str, user_message: str):
     try:
         response = client.beta.messages.create(**params)
     except anthropic.BadRequestError as e:
-        return None, f"요청 오류 400: {e.message}"
+        return None, ("SUMMARY_API_ERROR", f"요청 오류 400: {e.message}")
     except anthropic.AuthenticationError:
         raise
     except anthropic.APIStatusError as e:
-        return None, f"API 오류 {e.status_code}"
+        return None, ("SUMMARY_API_ERROR", f"API 오류 {e.status_code}")
     except anthropic.APIConnectionError:
-        return None, "API 연결 실패"
+        return None, ("SUMMARY_API_ERROR", "API 연결 실패")
 
     if response.stop_reason == "refusal":
         category = response.stop_details.category if response.stop_details else None
-        return None, f"모델이 거절함 (category={category})"
+        return None, ("SUMMARY_REFUSAL", f"모델이 거절함 (category={category})")
     if response.stop_reason == "max_tokens":
-        return None, "max_tokens에서 잘림"
+        return None, ("SUMMARY_TRUNCATED", "max_tokens에서 잘림")
     text = "".join(b.text for b in response.content if b.type == "text")
     try:
-        return json.loads(text), None
+        result = json.loads(text)
     except json.JSONDecodeError:
-        return None, "JSON 파싱 실패"
+        return None, ("SUMMARY_PARSE", "JSON 파싱 실패")
+    if not isinstance(result, dict):
+        return None, ("SUMMARY_PARSE", "JSON 파싱 실패")
+    return result, None
 
 
 def load_preview() -> dict:
@@ -186,7 +203,7 @@ def main():
     args = parser.parse_args()
 
     source = exporter.resolve_source(args.source)
-    exclude = frozenset() if args.include_published else frozenset(exporter.selector.published_anchor_ids())
+    exclude = frozenset() if args.include_published else exporter.selector.default_exclude_ids()
     anchors = exporter.collect_anchors(source, args.since, args.on, exclude)
     if args.limit:
         anchors = anchors[:args.limit]

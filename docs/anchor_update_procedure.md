@@ -1,7 +1,41 @@
-# 신규 앵커 갱신 절차 (수동 승인형)
+# 신규 앵커 갱신 절차
 
 `ax-vault-full`에 새로 들어온 기사 중 울산 직접 관련(scope: direct) 기사를 골라 public-ax daily 앵커로 추가하는 절차입니다.
-**자동 반영은 하지 않습니다.** 각 단계의 결과를 사람이 확인한 뒤 다음 단계로 넘어갑니다.
+
+## 자동 공개 (기본, 2026-10-17~)
+
+GitHub Actions `auto-publish.yml`이 매일 KST 12:00에 사람 승인 없이 실행합니다. Actions 탭에서 `workflow_dispatch`로 바로 돌릴 수도 있습니다.
+
+1. ax-vault-full을 읽기 전용 deploy key로 받습니다.
+2. 로그 규칙 테스트(`tests/`)를 돌립니다. 실패하면 공개하지 않습니다.
+3. 마지막 공개 날짜 − 7일 이후의 미공개 direct 후보에 대해 요약을 생성하고(앵커당 최대 3회) 검사합니다.
+4. 통과한 앵커만 daily·index·README에 쓰고 `master`에 커밋 1개로 push합니다. 신규 0건이면 커밋하지 않습니다.
+5. 새로 보류된 앵커가 있거나 실행이 실패하면 Issue를 엽니다. 매주 월요일 KST 15:00에 주간 요약 Issue가 열립니다.
+
+| 판정 | 사유 코드 |
+|---|---|
+| 보류 (공개 안 함) | `SUMMARY_API_ERROR` `SUMMARY_REFUSAL` `SUMMARY_TRUNCATED` `SUMMARY_PARSE` `SUMMARY_EMPTY` `COPY_RUN`(원문과 50자 이상 연속 일치) `FIRST_SENTENCE_TOO_LONG` `TEMPLATE_LINE` `LOCAL_PATH` `REVIEW_NOTE_LEAK` `PENDING_LEFT` `PRIVATE_PATH_FORMAT` `FILE_CHECK_FAILED` |
+| 품질 보정 후 공개 | `TOO_LONG`·`TOO_MANY_SENTENCES`(문장 단위로 자름), `RELEVANCE_LABEL`("울산 정책 참고사례"로 보정) |
+
+- 사유 코드 뒤의 `:summary` / `:relevance`는 걸린 필드입니다.
+- 보류 앵커는 7일 동안 매일 다시 시도합니다. 이미 열린 hold Issue에 있는 ID는 Issue를 다시 만들지 않습니다.
+- 공개 로그에는 앵커 ID·사유 코드·건수·파일명만 나옵니다. 제목·URL·본문·요약은 나오지 않습니다.
+
+## 공개한 앵커 내리기
+
+```powershell
+python scripts/unpublish_anchor.py <anchor_id>          # 계획만 출력 (dry-run)
+python scripts/unpublish_anchor.py <anchor_id> --write  # 실제 반영
+git diff                                                # 확인 후 commit / push
+```
+
+- 그 앵커 블록을 지우고 같은 파일의 번호·`anchor_count`, `index.md` 표, `README.md` 운영 현황을 다시 계산합니다. 남은 앵커가 없으면 날짜 파일을 지웁니다.
+- `config/auto_publish_exclude.txt`에 ID를 등록해 자동·수동 갱신이 다시 고르지 않게 합니다. `git revert`만 하면 다음 날 자동 실행이 다시 공개하므로 이 스크립트를 씁니다.
+- 보류 중인 앵커를 영구히 공개하지 않으려면 exclude 파일에 ID만 추가하고 hold Issue를 닫습니다.
+
+## 수동 갱신 (예비용)
+
+자동 공개가 멈췄거나 특정 앵커를 사람이 확인하고 넣을 때 씁니다. 각 단계의 결과를 사람이 확인한 뒤 다음 단계로 넘어갑니다.
 
 ## 준비
 
@@ -45,14 +79,14 @@ $env:AX_SUMMARY_MODEL = "claude-sonnet-5-5"   # 예: 다른 모델로 바꿀 때
 | 요약이 없는 anchor | 3단계를 같은 `--since`/`--date`로 실행 |
 | 요약·관련성이 빈 값 | 3단계를 `--regenerate`로 다시 실행 |
 | preview에 review(검토 필요)가 남은 anchor | 문장을 읽어 보고 괜찮으면 `--accept-review <anchor_id>`, 아니면 다시 생성 |
-| 요약·관련성이 원문과 30자 이상 연속으로 같음 | 다시 생성 |
+| 요약·관련성이 원문과 50자 이상 연속으로 같음 | 다시 생성 |
 | 템플릿에 없는 줄 (기사 본문 문장·내부 메모 유입 의심) | 원인 확인 (스크립트 수정 필요) |
 | private 원문 위치 형식 위반, 로컬 경로 문자열 | 원인 확인 |
 | review 메모 문구가 파일에 들어감 | 원인 확인 |
 
 ## 중복과 덧붙이기
 
-- public-ax `daily/`에 이미 있는 앵커 ID는 1~5단계 모두 기본으로 제외합니다 (`--include-published`로 포함).
+- public-ax `daily/`에 이미 있는 앵커 ID와 `config/auto_publish_exclude.txt`의 ID는 1~5단계 모두 기본으로 제외합니다 (`--include-published`로 포함).
 - 날짜 파일이 이미 있으면 기존 블록은 그대로 두고 끝에 번호를 이어서 덧붙이며, `anchor_count`를 갱신합니다.
   같은 앵커 ID가 그 파일에 이미 있으면 덧붙이지 않습니다.
 - `index.md`의 "일자별 앵커" 표와 `README.md`의 운영 현황 줄은 `daily/` 전체를 기준으로 다시 만듭니다.

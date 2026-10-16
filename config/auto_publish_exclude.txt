@@ -1,0 +1,3 @@
+# 공개를 철회한 앵커 ID. 자동 공개(auto-publish)와 수동 갱신 스크립트 모두 다시 고르지 않는다.
+# 한 줄에 하나: <8자리 anchor_id>  # 메모(날짜 등, 기사 내용은 쓰지 않음)
+# 보통은 scripts/unpublish_anchor.py <id> --write 가 자동으로 추가한다.

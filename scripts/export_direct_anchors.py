@@ -327,14 +327,14 @@ def render_readme_status(counts: dict) -> str:
             f"({dates[0]} ~ {dates[-1]}) — [일자별 앵커 목록](index.md#일자별-앵커)")
 
 
-def updated_index_and_readme(counts: dict):
-    index = INDEX_PATH.read_text(encoding="utf-8")
+def updated_index_and_readme(counts: dict, index_path: Path = INDEX_PATH, readme_path: Path = README_PATH):
+    index = index_path.read_text(encoding="utf-8")
     section = render_index_section(counts)
     if INDEX_SECTION_RE.search(index):
         new_index = INDEX_SECTION_RE.sub(lambda _: section, index, count=1)
     else:
         new_index = index.replace("## 운영 원칙", section + "## 운영 원칙", 1)
-    readme = README_PATH.read_text(encoding="utf-8")
+    readme = readme_path.read_text(encoding="utf-8")
     new_readme = README_STATUS_RE.sub(lambda _: render_readme_status(counts), readme, count=1)
     return new_index, new_readme
 
@@ -438,8 +438,7 @@ def main():
     if args.retag:
         run_retag(source, args)
         return
-    published = selector.published_anchor_ids()
-    exclude = frozenset() if args.include_published else frozenset(published)
+    exclude = frozenset() if args.include_published else selector.default_exclude_ids()
     anchors = collect_anchors(source, args.since, args.on, exclude)
     summaries, review, summary_stats = load_summaries(args.summaries, anchors, args.allow_missing_summaries)
     for a in anchors:

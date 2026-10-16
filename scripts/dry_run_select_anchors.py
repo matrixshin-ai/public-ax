@@ -37,6 +37,9 @@ DATE_RE = re.compile(r"(\d{4}-\d{2}-\d{2})")
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DAILY_DIR = REPO_ROOT / "daily"
 PUBLISHED_ID_RE = re.compile(r"^- 앵커 ID: ([0-9a-f]{8})\s*$", re.M)
+# 공개를 철회한 앵커(unpublish_anchor.py가 등록). 자동·수동 갱신 모두 다시 고르지 않는다.
+EXCLUDE_PATH = REPO_ROOT / "config" / "auto_publish_exclude.txt"
+EXCLUDE_ID_RE = re.compile(r"^([0-9a-f]{8})\b", re.M)
 
 # --- 제목 키워드 (그룹별) -------------------------------------------------
 # A: 울산 직접 - 지역명 + 울산 소재 기관
@@ -125,6 +128,18 @@ def published_anchor_ids(daily_dir: Path = DAILY_DIR) -> set:
     for f in sorted(daily_dir.glob("*.md")):
         ids.update(PUBLISHED_ID_RE.findall(f.read_text(encoding="utf-8")))
     return ids
+
+
+def excluded_anchor_ids(path: Path = EXCLUDE_PATH) -> set:
+    """config/auto_publish_exclude.txt의 anchor_id (한 줄에 하나, # 뒤는 주석)."""
+    if not path.exists():
+        return set()
+    return set(EXCLUDE_ID_RE.findall(path.read_text(encoding="utf-8")))
+
+
+def default_exclude_ids() -> frozenset:
+    """신규 갱신 때 기본으로 빼는 anchor_id: 이미 공개된 것 + 공개 철회 목록."""
+    return frozenset(published_anchor_ids() | excluded_anchor_ids())
 
 
 def iso_date(value: str) -> str:
@@ -330,7 +345,7 @@ def main():
     if not source.is_dir():
         sys.exit(f"source 폴더가 없습니다: {source}")
 
-    exclude = frozenset() if args.include_published else frozenset(published_anchor_ids())
+    exclude = frozenset() if args.include_published else default_exclude_ids()
     stats = run(source, args.scope, args.since, args.on, exclude)
     if args.json:
         out = {k: (dict(v) if isinstance(v, collections.Counter) else v) for k, v in stats.items()}

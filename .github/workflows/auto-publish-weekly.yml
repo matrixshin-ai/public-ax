@@ -1,0 +1,30 @@
+# auto-publish 주간 요약 Issue: 지난 7일 공개 건수, 품질 보정 공개, 보류 건, 실행 실패 여부.
+name: auto-publish-weekly
+
+on:
+  schedule:
+    - cron: '0 6 * * 1'   # 매주 월요일 KST 15:00
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+  actions: read
+
+jobs:
+  weekly:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Weekly summary issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python scripts/auto_publish_github.py weekly

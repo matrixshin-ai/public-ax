@@ -1,0 +1,81 @@
+# public-ax 자동 공개: ax-vault-full 신규 direct 앵커 -> 요약 생성 -> 안전성 검사 -> 통과분만 공개.
+# 공개 저장소의 Actions 로그는 누구나 볼 수 있다. 스크립트는 건수·anchor_id·사유 코드만 출력한다
+# (tests/test_auto_publish_logs.py로 검증, 테스트가 실패하면 공개하지 않는다).
+name: auto-publish
+
+on:
+  schedule:
+    - cron: '0 3 * * *'   # 매일 KST 12:00 (korea-industry-ax export 이후)
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  issues: write
+
+concurrency:
+  group: public-ax-publish
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Checkout ax-vault-full (read-only deploy key)
+        uses: actions/checkout@v4
+        with:
+          repository: matrixshin-ai/ax-vault-full
+          ssh-key: ${{ secrets.AX_VAULT_FULL_READ_KEY }}
+          path: vault
+          persist-credentials: false
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+
+      - run: pip install -q -r requirements.txt
+
+      - name: Log rule tests
+        run: python -m pytest -q tests
+
+      - name: Publish
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          AX_SUMMARY_MODEL: ${{ vars.AX_SUMMARY_MODEL }}
+          AX_VAULT_SOURCE: ${{ github.workspace }}/vault/AX뉴스
+        run: >-
+          python scripts/auto_publish.py --write
+          --report "$RUNNER_TEMP/report.json"
+          --commit-message "$RUNNER_TEMP/commit_msg.txt"
+
+      - name: Commit and push
+        run: |
+          if [ ! -f "$RUNNER_TEMP/commit_msg.txt" ]; then
+            echo "신규 공개 0건: 커밋하지 않습니다."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add daily index.md README.md
+          git commit -q -F "$RUNNER_TEMP/commit_msg.txt"
+          git push -q origin HEAD:master
+          git log -1 --format='커밋 %h: %s'
+
+      - name: Hold issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python scripts/auto_publish_github.py hold --report "$RUNNER_TEMP/report.json"
+
+      - name: Failure issue
+        if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh issue create --label auto-publish-failure \
+            --title "[auto-publish] 실행 실패 $(TZ=Asia/Seoul date +%F)" \
+            --body "자동 공개 실행이 실패했습니다. 이번 실행에서는 아무것도 공개되지 않았을 수 있습니다.
+
+          실행: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
