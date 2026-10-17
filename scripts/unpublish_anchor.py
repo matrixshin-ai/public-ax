@@ -38,14 +38,15 @@ def remove_block(text: str, anchor_id: str):
     return new, True
 
 
-def add_exclude(path: Path, anchor_id: str, today: str) -> bool:
+def add_exclude(path: Path, anchor_id: str, today: str, reason: str = "") -> bool:
     if anchor_id in selector.excluded_anchor_ids(path):
         return False
     path.parent.mkdir(exist_ok=True)
     text = path.read_text(encoding="utf-8") if path.exists() else ""
     if text and not text.endswith("\n"):
         text += "\n"
-    path.write_text(text + f"{anchor_id}  # unpublished {today}\n", encoding="utf-8", newline="\n")
+    note = f"unpublished {today}" + (f" {reason}" if reason else "")
+    path.write_text(text + f"{anchor_id}  # {note}\n", encoding="utf-8", newline="\n")
     return True
 
 

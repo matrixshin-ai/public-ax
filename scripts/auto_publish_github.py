@@ -3,8 +3,8 @@ auto-publish 알림 (GitHub Issue). gh CLI와 GH_TOKEN을 쓴다. 표준 라이�
 
 - hold --report <auto_publish 결과 JSON>: 이번 실행에서 처음 보류된 anchor_id가 있으면 Issue 1건.
   이미 열려 있는 hold Issue에 있는 ID는 다시 올리지 않는다 (보류 앵커는 매일 재시도되므로).
-- weekly: 지난 7일 공개 건수(auto-publish 커밋), 품질 보정 공개, 보류 건(hold Issue), 실행 실패 수를
-  Issue 1건으로 올린다.
+- weekly: 지난 7일 공개 건수(auto-publish 커밋), 품질 보정 공개, 보류 건(hold Issue), 원본 소멸로
+  내린 앵커(auto-publish 커밋의 unpublish 줄), 실행 실패 수를 Issue 1건으로 올린다.
 - Issue 본문에는 anchor_id·사유 코드·건수·실행 링크만 쓴다.
 - --dry-run: Issue를 만들지 않고 제목·본문만 출력한다.
 """
@@ -23,6 +23,7 @@ WORKFLOW = "auto-publish.yml"
 COMMIT_PREFIX = "auto-publish"
 ID_LINE_RE = re.compile(r"^- `?([0-9a-f]{8})`?\s*(?:—|-)?\s*(.*)$", re.M)
 COMMIT_LINE_RE = re.compile(r"^- ([0-9a-f]{8}) daily/\S+(?: \[quality: ([^\]]+)\])?$", re.M)
+UNPUBLISH_LINE_RE = re.compile(r"^- unpublish ([0-9a-f]{8}) daily/\S+ \((\w+)\)$", re.M)
 
 
 def gh(*args) -> str:
@@ -56,22 +57,24 @@ def ids_in_open_hold_issues() -> set:
 
 
 def parse_publish_log(log_text: str):
-    """git log 본문들 -> (공개 ID 목록, {ID: 품질 코드})."""
+    """git log 본문들 -> (공개 ID 목록, {ID: 품질 코드}, 원본 소멸로 내린 ID 목록)."""
     published, quality = [], {}
     for m in COMMIT_LINE_RE.finditer(log_text):
         published.append(m.group(1))
         if m.group(2):
             quality[m.group(1)] = m.group(2)
-    return published, quality
+    vanished = [m.group(1) for m in UNPUBLISH_LINE_RE.finditer(log_text) if m.group(2) == "SOURCE_VANISHED"]
+    return published, quality, vanished
 
 
 def weekly_issue(start: datetime, end: datetime, published: list, quality: dict, held: dict,
-                 runs_total: int, runs_failed: int):
+                 runs_total: int, runs_failed: int, vanished: list = ()):
     title = f"[auto-publish] 주간 요약 {start:%Y-%m-%d} ~ {end:%Y-%m-%d}"
     lines = [f"- 공개: {len(published)}건", f"- 품질 보정 후 공개: {len(quality)}건"]
     lines += [f"  - `{aid}` — {codes}" for aid, codes in sorted(quality.items())]
     lines.append(f"- 보류: {len(held)}건")
     lines += [f"  - `{aid}` — {codes}" for aid, codes in sorted(held.items())]
+    lines.append(f"- 원본 소멸로 내림: {', '.join(f'`{aid}`' for aid in vanished) if vanished else '없음'}")
     lines.append(f"- 실행 실패: {'없음' if not runs_failed else f'{runs_failed}회'} (전체 실행 {runs_total}회)")
     return title, "\n".join(lines) + "\n"
 
@@ -81,7 +84,7 @@ def collect_weekly(now: datetime):
     log_text = subprocess.run(
         ["git", "log", f"--since={start.isoformat()}", f"--grep=^{COMMIT_PREFIX} ", "--format=%B"],
         check=True, capture_output=True, text=True, encoding="utf-8").stdout
-    published, quality = parse_publish_log(log_text)
+    published, quality, vanished = parse_publish_log(log_text)
     held = {}
     for i in json.loads(gh("issue", "list", "--label", LABEL_HOLD, "--state", "all", "--limit", "200",
                            "--json", "body,createdAt")):
@@ -93,7 +96,7 @@ def collect_weekly(now: datetime):
                                      "--json", "conclusion,createdAt"))
             if datetime.fromisoformat(r["createdAt"].replace("Z", "+00:00")) >= start]
     failed = sum(1 for r in runs if r.get("conclusion") == "failure")
-    return start, published, quality, held, len(runs), failed
+    return start, published, quality, held, len(runs), failed, vanished
 
 
 def create_issue(title: str, body: str, label: str, dry_run: bool):
@@ -124,8 +127,9 @@ def main():
         create_issue(*issue, LABEL_HOLD, args.dry_run)
     else:
         now = datetime.now(KST)
-        start, published, quality, held, total, failed = collect_weekly(now)
-        create_issue(*weekly_issue(start, now, published, quality, held, total, failed), LABEL_WEEKLY, args.dry_run)
+        start, published, quality, held, total, failed, vanished = collect_weekly(now)
+        create_issue(*weekly_issue(start, now, published, quality, held, total, failed, vanished),
+                     LABEL_WEEKLY, args.dry_run)
 
 
 if __name__ == "__main__":

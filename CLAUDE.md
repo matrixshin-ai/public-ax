@@ -11,7 +11,7 @@
 
 - 기사 전문·본문 일부·긴 인용 금지. 요약은 1~3문장의 짧은 사실 요약만.
 - 코드·문서에 개인 로컬 경로를 쓰지 않는다. 원자료 경로는 `--source` 또는 `AX_VAULT_SOURCE`.
-- **자동 공개(2026-10-17~).** GitHub Actions `auto-publish.yml`이 매일 KST 12:00에 사람 승인 없이
+- **자동 공개(2026-10-17~).** GitHub Actions `auto-publish.yml`이 매일 KST 12:30에 사람 승인 없이
   후보 추출 → 요약 생성 → 안전성 검사 → 통과분만 `master`에 직접 commit·push한다.
   공개 조건: 요약 존재 + COPY_RUN 없음 + 유출 검사 통과. 상세는 아래 "자동 공개".
   수동 스크립트 절차(`docs/anchor_update_procedure.md`)는 예비용이며, 로컬에서 수동 commit/push는 사용자 확인 후에만.
@@ -41,8 +41,10 @@
 
 ## 자동 공개
 
-- 워크플로: `.github/workflows/auto-publish.yml`(매일 03:00 UTC = KST 12:00, `workflow_dispatch`,
+- 워크플로: `.github/workflows/auto-publish.yml`(매일 03:30 UTC = KST 12:30, `workflow_dispatch`,
   concurrency `public-ax-publish`), `auto-publish-weekly.yml`(월 06:00 UTC = KST 15:00).
+  12:30인 이유: korea-industry-ax export가 늦으면 KST 11:53경 끝난 날이 있음(10-13). export 도중이나
+  직전(대략 KST 08:50~12:00)에 수동 실행하면 vault 삭제와 엇갈릴 수 있다(10-17 `690b32fa` 사례).
 - 인증: ax-vault-full 읽기 전용 deploy key → Secret `AX_VAULT_FULL_READ_KEY`. Claude API → Secret `ANTHROPIC_API_KEY`.
 - 후보 범위: 마지막 공개 날짜 − 7일 이후, 공개된 ID·exclude 제외. 보류 앵커는 이 기간 동안 매일 재시도.
 - **COPY_RUN 기준 50자 (summary·관련성 모두).** 이유: AX 기사는 영문 약어 + 풀이 + 한국어 대응어
@@ -52,10 +54,18 @@
   `REVIEW_NOTE_LEAK`, `PENDING_LEFT`, `PRIVATE_PATH_FORMAT`, `FILE_CHECK_FAILED`(파일 검사 실패 시 그 파일의 신규 앵커만).
 - 품질 보정 후 공개(주간 요약에 ID·코드 표시): `TOO_LONG`·`TOO_MANY_SENTENCES`(문장 단위로 자름),
   `RELEVANCE_LABEL`("울산 정책 참고사례"로 보정). 요약·관련성의 줄바꿈은 검사 전에 한 칸으로 정리.
-- 커밋: 실행 1회당 1개. 제목 `auto-publish YYYY-MM-DD: N anchors`, 본문 `- <id> daily/<날짜>.md [quality: ...]`.
-  신규 0건이면 커밋 안 함. 작성자 github-actions[bot].
+- **원본 소멸 자동 내림.** 실행마다 공개된 앵커의 vault 파일(파일명 끝 anchor_id 기준)이 있는지 본다.
+  없으면 블록을 내리고 exclude에 `# unpublished <날짜> SOURCE_VANISHED`로 등록한다. vault 파일은
+  korea-industry-ax `export_to_vault.py`가 그 기사를 다른 기사의 `related`로 흡수했을 때만 지운다
+  (수집 기간에서 빠진 기사는 지우지 않음). 대표 기사는 보통 다음 실행에서 따로 공개된다.
+  한 번에 **5건 넘게** 사라졌으면 vault 체크아웃 이상으로 보고 아무것도 내리지 않고(요약 생성도 안 함)
+  실패 처리 → 실패 Issue 제목·본문에 `VANISHED_TOO_MANY`와 건수.
+- 커밋: 실행 1회당 1개. 제목 `auto-publish YYYY-MM-DD: N anchors[, M unpublished]`, 본문
+  `- <id> daily/<날짜>.md [quality: ...]` / `- unpublish <id> daily/<날짜>.md (SOURCE_VANISHED)`.
+  공개·내림 모두 0건이면 커밋 안 함. 작성자 github-actions[bot].
 - 알림(Issue): 새 보류 ID가 있으면 `auto-publish-hold`(열린 hold Issue에 이미 있는 ID는 제외),
-  실행 실패 시 `auto-publish-failure`, 주간 요약 `auto-publish-weekly`.
+  실행 실패 시 `auto-publish-failure`(사유 코드가 있으면 함께), 주간 요약 `auto-publish-weekly`
+  (공개·품질 보정·보류·"원본 소멸로 내림: ID"·실행 실패).
 - 앵커 내리기: `python scripts/unpublish_anchor.py <id>`(dry-run) → `--write` → git diff 확인 → commit/push.
   exclude에 등록되므로 다음 자동 실행이 다시 공개하지 않는다. 보류 Issue의 앵커를 영구히 빼려면
   exclude 파일에 ID만 추가한다. `git revert`만 하면 다음 날 다시 공개되니 쓰지 않는다.
@@ -98,8 +108,14 @@
 - COPY_RUN 30자 → 50자. 기존 review 3건(45a4a523·9780a07a는 COPY 31·30자, 5279bc43은 3문장)은
   새 기준이면 각각 통과 / 품질 보정 대상. 이미 공개된 69건은 다시 처리하지 않음.
 - 실제 daily 69건 전부에 블록 제거를 돌려 다른 블록·헤더가 바뀌지 않음을 확인(unpublish_anchor.py).
+- 첫 실행(workflow_dispatch, run 38983725995): 83건 공개·보류 0(`7b0ca87`) → 152건. 원문 최장 일치 42자.
+  로그에서 제목·요약·관련성·URL 0건 확인(본문 조각 일치 18건은 전부 pytest 출력의 공백 15칸 오탐).
+- `690b32fa` 내림(`f8f4208`): 실행이 vault를 받은 23:52 UTC 직후 23:54 UTC export에서 대표 기사
+  `8e3e7880`(A그룹, 미공개)의 related로 병합돼 vault 파일이 지워짐. 대표 기사는 다음 실행에서 공개 대상.
+  → 재발 대비로 원본 소멸 자동 내림 추가, 정기 실행을 KST 12:30으로 변경.
 
 ## 남은 일
 
+- 다음 정기 실행에서 `8e3e7880` 공개 확인.
 - 첫 주간 요약(2026-10-19 월) Issue 내용 확인.
 - export-summary가 다음 자동 실행에서 skipped로 나오는지(korea-industry-ax 쪽) 확인.

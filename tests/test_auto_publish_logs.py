@@ -87,6 +87,10 @@ def make_vault(tmp_path: Path) -> Path:
               f"industries:\n- 조선\nurl: https://example.com/news/{aid}\nregion: 울산\n---\n")
         (folder / f"기사{n}_{aid}.md").write_text(fm + f"# {title}\n출처: 테스트일보\n\n{body_of(aid)}\n",
                                                 encoding="utf-8")
+    old = source / "2026" / PUBLISHED_DATE  # make_repo가 공개해 둔 앵커의 원본
+    old.mkdir(parents=True)
+    (old / "기존_b0000001.md").write_text(f"---\ntitle: '이미 공개된 앵커'\ndate: {PUBLISHED_DATE}\nregion: 울산\n---\n본문\n",
+                                         encoding="utf-8")
     return source
 
 
@@ -182,9 +186,10 @@ def test_written_files(published):
 def test_commit_message_lists_ids_and_roundtrips_to_weekly(published):
     first, *rest = published.msg.splitlines()
     assert first == "auto-publish 2026-10-17: 4 anchors"
-    ids, quality = notify.parse_publish_log(published.msg)
+    ids, quality, vanished = notify.parse_publish_log(published.msg)
     assert sorted(ids) == ["a0000001", "a0000005", "a0000007", "a0000008"]
     assert quality == {"a0000005": "TOO_MANY_SENTENCES:summary", "a0000008": "RELEVANCE_LABEL:relevance"}
+    assert vanished == [] and published.report["unpublished"] == []
 
 
 def test_second_run_no_new_means_no_commit(published, capsys):
@@ -209,9 +214,66 @@ def test_hold_issue_dedupes_already_reported(published):
 def test_weekly_issue_body_only_ids_and_codes():
     from datetime import datetime
     title, body = notify.weekly_issue(datetime(2026, 10, 12), datetime(2026, 10, 19), ["a0000001"],
-                                      {"a0000001": "TOO_LONG:summary"}, {"a0000002": "COPY_RUN:summary"}, 7, 1)
+                                      {"a0000001": "TOO_LONG:summary"}, {"a0000002": "COPY_RUN:summary"}, 7, 1,
+                                      ["b0000001"])
     assert "공개: 1건" in body and "보류: 1건" in body and "실행 실패: 1회" in body
+    assert "- 원본 소멸로 내림: `b0000001`" in body
+    assert "- 원본 소멸로 내림: 없음" in notify.weekly_issue(datetime(2026, 10, 12), datetime(2026, 10, 19),
+                                                       [], {}, {}, 7, 0)[1]
     assert_no_leak(title + body)
+
+
+def _run(source, repo, tmp_path, client, today="2026-10-17"):
+    report, msg = tmp_path / f"report-{today}.json", tmp_path / f"msg-{today}.txt"
+    rc = auto_publish.main(["--source", str(source), "--repo-root", str(repo), "--today", today, "--write",
+                            "--report", str(report), "--commit-message", str(msg)], client=client)
+    return rc, json.loads(report.read_text(encoding="utf-8")), (msg.read_text(encoding="utf-8") if msg.exists() else None)
+
+
+def test_vanished_source_is_unpublished_and_excluded(tmp_path, capsys):
+    source, repo = make_vault(tmp_path), make_repo(tmp_path)
+    (source / "2026" / PUBLISHED_DATE / "기존_b0000001.md").unlink()  # 다른 기사의 related로 병합된 경우
+    rc, report, msg = _run(source, repo, tmp_path, FakeClient())
+    out = capsys.readouterr()
+    assert rc == 0
+    assert report["unpublished"] == [{"id": "b0000001", "daily": f"daily/{PUBLISHED_DATE}.md",
+                                      "reason": "SOURCE_VANISHED"}]
+    assert not (repo / "daily" / f"{PUBLISHED_DATE}.md").exists()  # 남은 블록 0개 -> 파일 삭제
+    assert "| 2026-10-10 |" not in (repo / "index.md").read_text(encoding="utf-8")
+    assert "1 files, 4 anchors" in (repo / "README.md").read_text(encoding="utf-8")
+    exclude = (repo / "config" / "auto_publish_exclude.txt").read_text(encoding="utf-8")
+    assert "b0000001  # unpublished 2026-10-17 SOURCE_VANISHED" in exclude
+    assert msg.splitlines()[0] == "auto-publish 2026-10-17: 4 anchors, 1 unpublished"
+    assert notify.parse_publish_log(msg)[2] == ["b0000001"]
+    assert "b0000001" not in notify.parse_publish_log(msg)[0]
+    assert "UNPUBLISH b0000001 daily/2026-10-10.md SOURCE_VANISHED" in out.out
+    assert "이미 공개된 앵커" not in out.out + out.err + msg
+    assert_no_leak(out.out + out.err + msg)
+
+    # 다음 실행: 신규도 내림도 없으면 커밋 메시지를 만들지 않는다
+    rc, report, msg = _run(source, repo, tmp_path, FakeClient(), today="2026-10-18")
+    assert rc == 0 and msg is None and report["unpublished"] == []
+
+
+def test_too_many_vanished_fails_without_changes(tmp_path, capsys):
+    source, repo = make_vault(tmp_path), make_repo(tmp_path)
+    extra = [_anchor(f"d000000{i}", "2026-10-11") for i in range(1, 6)]  # vault에 없는 공개 앵커 5건 추가
+    (repo / "daily" / "2026-10-11.md").write_text(exporter.render_daily("2026-10-11", extra), encoding="utf-8",
+                                                  newline="\n")
+    (source / "2026" / PUBLISHED_DATE / "기존_b0000001.md").unlink()  # 합계 6건 소멸
+    before = {p: p.read_text(encoding="utf-8") for p in repo.rglob("*") if p.is_file()}
+    client = FakeClient()
+    rc, report, msg = _run(source, repo, tmp_path, client)
+    out = capsys.readouterr().out
+    assert rc == 1 and report == {"error": "VANISHED_TOO_MANY", "vanished_count": 6} and msg is None
+    assert "ERROR VANISHED_TOO_MANY count=6" in out
+    assert before == {p: p.read_text(encoding="utf-8") for p in repo.rglob("*") if p.is_file()}
+    assert client.calls == {}  # 요약 생성도 하지 않음
+
+    # 정확히 5건이면 내린다
+    (repo / "daily" / f"{PUBLISHED_DATE}.md").unlink()
+    rc, report, _ = _run(source, repo, tmp_path, FakeClient())
+    assert rc == 0 and sorted(u["id"] for u in report["unpublished"]) == [f"d000000{i}" for i in range(1, 6)]
 
 
 def test_exception_prints_type_only(tmp_path, capsys, monkeypatch):

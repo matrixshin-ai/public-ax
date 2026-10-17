@@ -5,7 +5,7 @@ name: auto-publish
 
 on:
   schedule:
-    - cron: '0 3 * * *'   # 매일 KST 12:00 (korea-industry-ax export 이후)
+    - cron: '30 3 * * *'   # 매일 KST 12:30 (korea-industry-ax export 이후)
   workflow_dispatch:
 
 permissions:
@@ -59,7 +59,7 @@ jobs:
           fi
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add daily index.md README.md
+          git add -A daily index.md README.md config
           git commit -q -F "$RUNNER_TEMP/commit_msg.txt"
           git push -q origin HEAD:master
           git log -1 --format='커밋 %h: %s'
@@ -74,8 +74,12 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          REASON=$(jq -r '.error // empty' "$RUNNER_TEMP/report.json" 2>/dev/null || true)
+          COUNT=$(jq -r '.vanished_count // empty' "$RUNNER_TEMP/report.json" 2>/dev/null || true)
           gh issue create --label auto-publish-failure \
-            --title "[auto-publish] 실행 실패 $(TZ=Asia/Seoul date +%F)" \
+            --title "[auto-publish] 실행 실패 $(TZ=Asia/Seoul date +%F)${REASON:+ ($REASON)}" \
             --body "자동 공개 실행이 실패했습니다. 이번 실행에서는 아무것도 공개되지 않았을 수 있습니다.
+          ${REASON:+
+          사유 코드: $REASON${COUNT:+ (원본이 사라진 공개 앵커 ${COUNT}건 - 5건 초과라 내리지 않음. vault 체크아웃 상태를 확인하세요)}}
 
           실행: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"

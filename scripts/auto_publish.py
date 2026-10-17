@@ -11,6 +11,9 @@ public-ax 자동 공개 (GitHub Actions auto-publish.yml 전용, 사람 승인 �
   - 품질 보정 후 공개: TOO_LONG·TOO_MANY_SENTENCES(문장 단위로 자름), RELEVANCE_LABEL
     ("울산 정책 참고사례"로 보정). 보정 코드는 커밋 메시지와 주간 요약에 ID와 함께 남는다.
   - 요약·관련성의 줄바꿈·연속 공백은 검사 전에 한 칸으로 정리한다.
+- 원본 소멸: 공개된 앵커의 vault 파일(파일명 끝 anchor_id 기준)이 사라졌으면(예: 다른 기사의
+  related로 병합) 그 블록을 내리고 exclude에 등록한다(SOURCE_VANISHED). 한 번에 MAX_VANISHED건을
+  넘게 사라졌으면 vault 체크아웃 이상으로 보고 아무것도 하지 않고 실패한다(VANISHED_TOO_MANY).
 - 출력 규칙(공개 로그): 건수·anchor_id·사유 코드·daily 파일명만 출력한다. 기사 제목·URL·본문,
   원문 일치 문장, 생성 요약·관련성 문장, API 오류 원문은 출력하지 않는다. 예외도 타입 이름만.
   tests/test_auto_publish_logs.py가 이 규칙을 검증한다.
@@ -28,11 +31,14 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import anchor_safety as safety  # noqa: E402
 import export_direct_anchors as exporter  # noqa: E402
 import generate_direct_anchor_summaries as gen  # noqa: E402
+import unpublish_anchor  # noqa: E402
 
 selector = exporter.selector
 KST = timezone(timedelta(hours=9))
 LOOKBACK_DAYS = 7
 MAX_ATTEMPTS = 3
+MAX_VANISHED = 5  # 한 번에 이보다 많이 사라지면 오작동으로 보고 내리지 않는다
+VANISHED_CODE = "SOURCE_VANISHED"
 FALLBACK_LABEL = "울산 정책 참고사례"  # 라벨이 허용값 밖일 때 보수적인 쪽으로 보정
 COMMIT_PREFIX = "auto-publish"
 
@@ -44,8 +50,21 @@ LIMITS = {  # 필드 -> (결과 키, 최대 문장 수, 최대 글자 수)
 }
 
 
+class VanishedTooMany(Exception):
+    def __init__(self, count: int):
+        super().__init__(count)
+        self.count = count
+
+
 def log(msg: str = ""):
     print(msg, flush=True)
+
+
+def find_vanished(source: Path, texts: dict) -> list:
+    """공개된 anchor_id 중 vault에 파일이 없는 것."""
+    present = {m.group(1) for p in source.rglob("*.md") if (m := selector.ANCHOR_ID_RE.search(p.name))}
+    published = set().union(*(selector.PUBLISHED_ID_RE.findall(t) for t in texts.values()))
+    return sorted(published - present)
 
 
 def codes_of(issues) -> list:
@@ -116,13 +135,27 @@ def run(source: Path, repo_root: Path, client, model: str, effort: str = "medium
         max_attempts: int = MAX_ATTEMPTS, lookback_days: int = LOOKBACK_DAYS, write: bool = False,
         today: str = None) -> dict:
     daily_dir = repo_root / "daily"
+    exclude_path = repo_root / "config" / "auto_publish_exclude.txt"
     today = today or datetime.now(KST).date().isoformat()
+    texts = {f.stem: f.read_text(encoding="utf-8") for f in sorted(daily_dir.glob("????-??-??.md"))}
+
+    # 원본 소멸 앵커 내리기 (메모리에서만, 쓰기는 마지막에 한 번에)
+    vanished = find_vanished(source, texts)
+    if len(vanished) > MAX_VANISHED:
+        raise VanishedTooMany(len(vanished))
+    unpublished, touched = [], set()  # touched: 블록을 지운 날짜
+    for aid in vanished:
+        for d in sorted(texts):
+            if texts[d] and aid in selector.PUBLISHED_ID_RE.findall(texts[d]):
+                texts[d], _ = unpublish_anchor.remove_block(texts[d], aid)  # None = 블록이 하나도 안 남음
+                touched.add(d)
+                unpublished.append({"id": aid, "daily": f"daily/{d}.md", "reason": VANISHED_CODE})
+
     last = last_published_date(daily_dir)
     since = (date.fromisoformat(last) - timedelta(days=lookback_days)).isoformat() if last else None
-    exclude = selector.published_anchor_ids(daily_dir) | selector.excluded_anchor_ids(
-        repo_root / "config" / "auto_publish_exclude.txt")
+    exclude = selector.published_anchor_ids(daily_dir) | selector.excluded_anchor_ids(exclude_path)
     anchors = exporter.collect_anchors(source, since, None, frozenset(exclude))
-    log(f"[auto-publish] {today} since={since} 대상 {len(anchors)}건, 모델 {model} "
+    log(f"[auto-publish] {today} since={since} 대상 {len(anchors)}건, 원본 소멸 {len(vanished)}건, 모델 {model} "
         "(제목·URL·본문·요약은 출력하지 않습니다)")
 
     held, quality, ready, notes = {}, {}, [], []
@@ -158,8 +191,7 @@ def run(source: Path, repo_root: Path, client, model: str, effort: str = "medium
         by_date[a["date"]].append(a)
     planned = {}
     for d, items in sorted(by_date.items()):
-        path = daily_dir / f"{d}.md"
-        existing = path.read_text(encoding="utf-8") if path.exists() else ""
+        existing = texts.get(d) or ""
         text, added, _ = exporter.append_daily(existing, items) if existing else (
             exporter.render_daily(d, items), len(items), 0)
         file_codes = sorted({code for _, code, _ in safety.daily_text_issues(text, notes)})
@@ -172,39 +204,58 @@ def run(source: Path, repo_root: Path, client, model: str, effort: str = "medium
 
     published = [{"id": a["anchor_id"], "daily": f"daily/{d}.md", "quality": quality.get(a["anchor_id"], [])}
                  for d, (_, items) in sorted(planned.items()) for a in items]
-    if write and planned:
-        for d, (text, _) in planned.items():
-            (daily_dir / f"{d}.md").write_text(text, encoding="utf-8", newline="\n")
-        texts = {f.stem: f.read_text(encoding="utf-8") for f in sorted(daily_dir.glob("????-??-??.md"))}
+    for d, (text, _) in planned.items():
+        texts[d] = text
+    for d in touched - set(planned):  # 블록만 지운 파일도 쓰기 전에 검사
+        if texts[d] is not None and safety.daily_text_issues(texts[d]):
+            raise RuntimeError("UNPUBLISH_CHECK_FAILED")
+    if write and (planned or touched):
+        for d in set(planned) | touched:
+            path = daily_dir / f"{d}.md"
+            if texts[d] is None:
+                path.unlink(missing_ok=True)
+            else:
+                path.write_text(texts[d], encoding="utf-8", newline="\n")
+        counts = exporter.daily_counts({d: t for d, t in texts.items() if t is not None})
         new_index, new_readme = exporter.updated_index_and_readme(
-            exporter.daily_counts(texts), repo_root / "index.md", repo_root / "README.md")
+            counts, repo_root / "index.md", repo_root / "README.md")
         (repo_root / "index.md").write_text(new_index, encoding="utf-8", newline="\n")
         (repo_root / "README.md").write_text(new_readme, encoding="utf-8", newline="\n")
+        for u in unpublished:
+            unpublish_anchor.add_exclude(exclude_path, u["id"], today, VANISHED_CODE)
 
+    for u in unpublished:
+        log(f"  UNPUBLISH {u['id']} {u['daily']} {u['reason']}")
     for p in published:
         log(f"  PUBLISH {p['id']} {p['daily']}" + (f" QUALITY {','.join(p['quality'])}" if p["quality"] else ""))
     for aid in sorted(held):
         log(f"  HOLD    {aid} {','.join(held[aid])}")
     n_quality = sum(1 for p in published if p["quality"])
     log(f"결과: 공개 {len(published)} / 보류 {len(held)} / 품질 보정 공개 {n_quality}"
-        + ("" if write else " (dry-run: 파일을 쓰지 않음)"))
+        f" / 원본 소멸로 내림 {len(unpublished)}" + ("" if write else " (dry-run: 파일을 쓰지 않음)"))
     return {
         "date": today,
         "since": since,
         "candidates": len(anchors),
         "published": published,
         "held": [{"id": aid, "codes": held[aid]} for aid in sorted(held)],
+        "unpublished": unpublished,
     }
 
 
 def commit_message(report: dict):
-    """신규 0건이면 None. 본문 한 줄에 앵커 하나 (ID·daily 파일·품질 보정 코드만)."""
-    pub = report["published"]
-    if not pub:
+    """공개·내림이 모두 0건이면 None. 본문 한 줄에 앵커 하나 (ID·daily 파일·코드만)."""
+    pub, unpub = report["published"], report.get("unpublished", [])
+    if not pub and not unpub:
         return None
-    lines = [f"{COMMIT_PREFIX} {report['date']}: {len(pub)} anchors", ""]
+    title = f"{COMMIT_PREFIX} {report['date']}: {len(pub)} anchors"
+    if unpub:
+        title += f", {len(unpub)} unpublished"
+    lines = [title, ""]
     for p in pub:
         lines.append(f"- {p['id']} {p['daily']}" + (f" [quality: {','.join(p['quality'])}]" if p["quality"] else ""))
+    for u in unpub:
+        lines.append(f"- unpublish {u['id']} {u['daily']} ({u['reason']})")
     return "\n".join(lines) + "\n"
 
 
@@ -239,9 +290,21 @@ def main(argv=None, client=None):
         if args.commit_message and msg:
             Path(args.commit_message).write_text(msg, encoding="utf-8", newline="\n")
         return 0
-    except Exception as e:  # noqa: BLE001 - traceback·예외 메시지는 기사 내용을 담을 수 있어 타입만 출력
-        log(f"ERROR {type(e).__name__}")
+    except VanishedTooMany as e:
+        log(f"ERROR VANISHED_TOO_MANY count={e.count} (최대 {MAX_VANISHED}건) - 아무것도 내리지 않았습니다")
+        write_error(args.report, "VANISHED_TOO_MANY", vanished_count=e.count)
         return 1
+    except Exception as e:  # noqa: BLE001 - traceback·예외 메시지는 기사 내용을 담을 수 있어 타입만 출력
+        code = str(e) if str(e) == "UNPUBLISH_CHECK_FAILED" else type(e).__name__
+        log(f"ERROR {code}")
+        write_error(args.report, code)
+        return 1
+
+
+def write_error(report_path, code: str, **extra):
+    """실패 Issue가 사유 코드를 읽을 수 있게 결과 JSON에 남긴다 (코드·건수만)."""
+    if report_path:
+        Path(report_path).write_text(json.dumps({"error": code, **extra}), encoding="utf-8")
 
 
 if __name__ == "__main__":

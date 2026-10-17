@@ -4,13 +4,14 @@
 
 ## 자동 공개 (기본, 2026-10-17~)
 
-GitHub Actions `auto-publish.yml`이 매일 KST 12:00에 사람 승인 없이 실행합니다. Actions 탭에서 `workflow_dispatch`로 바로 돌릴 수도 있습니다.
+GitHub Actions `auto-publish.yml`이 매일 KST 12:30에 사람 승인 없이 실행합니다. Actions 탭에서 `workflow_dispatch`로 바로 돌릴 수도 있습니다. 단 korea-industry-ax export가 도는 시간(대략 KST 08:50~12:00)에는 수동 실행을 피합니다.
 
 1. ax-vault-full을 읽기 전용 deploy key로 받습니다.
 2. 로그 규칙 테스트(`tests/`)를 돌립니다. 실패하면 공개하지 않습니다.
-3. 마지막 공개 날짜 − 7일 이후의 미공개 direct 후보에 대해 요약을 생성하고(앵커당 최대 3회) 검사합니다.
-4. 통과한 앵커만 daily·index·README에 쓰고 `master`에 커밋 1개로 push합니다. 신규 0건이면 커밋하지 않습니다.
-5. 새로 보류된 앵커가 있거나 실행이 실패하면 Issue를 엽니다. 매주 월요일 KST 15:00에 주간 요약 Issue가 열립니다.
+3. 이미 공개된 앵커 중 vault 원본 파일이 사라진 것을 찾아 내립니다(아래 "원본 소멸 자동 내림").
+4. 마지막 공개 날짜 − 7일 이후의 미공개 direct 후보에 대해 요약을 생성하고(앵커당 최대 3회) 검사합니다.
+5. 통과한 앵커와 내린 앵커를 daily·index·README·exclude에 반영하고 `master`에 커밋 1개로 push합니다. 공개·내림이 모두 0건이면 커밋하지 않습니다.
+6. 새로 보류된 앵커가 있거나 실행이 실패하면 Issue를 엽니다. 매주 월요일 KST 15:00에 주간 요약 Issue가 열립니다.
 
 | 판정 | 사유 코드 |
 |---|---|
@@ -20,6 +21,12 @@ GitHub Actions `auto-publish.yml`이 매일 KST 12:00에 사람 승인 없이 �
 - 사유 코드 뒤의 `:summary` / `:relevance`는 걸린 필드입니다.
 - 보류 앵커는 7일 동안 매일 다시 시도합니다. 이미 열린 hold Issue에 있는 ID는 Issue를 다시 만들지 않습니다.
 - 공개 로그에는 앵커 ID·사유 코드·건수·파일명만 나옵니다. 제목·URL·본문·요약은 나오지 않습니다.
+
+### 원본 소멸 자동 내림
+
+- korea-industry-ax는 어떤 기사가 다른 기사의 `related`로 병합되면 그 기사의 vault 파일을 지웁니다. 이미 공개된 앵커가 이렇게 되면, 다음 자동 실행이 그 블록을 내리고 `config/auto_publish_exclude.txt`에 `SOURCE_VANISHED`로 등록합니다. 대표 기사는 아직 공개되지 않았다면 같은 실행이나 다음 실행에서 따로 공개됩니다.
+- 커밋 본문에는 `- unpublish <id> daily/<날짜>.md (SOURCE_VANISHED)`로 남고, 주간 요약에는 "원본 소멸로 내림: ID"로 표시됩니다.
+- 한 번에 5건 넘게 사라졌으면 vault 체크아웃 이상일 수 있으므로 아무것도 내리지 않고 실행을 실패시킵니다. 실패 Issue에 `VANISHED_TOO_MANY`와 건수가 나옵니다. vault 상태를 확인한 뒤 정말 내려야 하면 아래 수동 스크립트로 한 건씩 내립니다.
 
 ## 공개한 앵커 내리기
 
