@@ -2,3 +2,4 @@
 # 한 줄에 하나: <8자리 anchor_id>  # 메모(날짜 등, 기사 내용은 쓰지 않음)
 # 보통은 scripts/unpublish_anchor.py <id> --write 가 자동으로 추가한다.
 690b32fa  # unpublished 2026-10-17
+0fc65e5b  # unpublished 2026-10-21 SOURCE_VANISHED
