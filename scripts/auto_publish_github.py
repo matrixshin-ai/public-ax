@@ -6,7 +6,9 @@ auto-publish 알림 (GitHub Issue). gh CLI와 GH_TOKEN을 쓴다. 표준 라이�
 - weekly: 지난 7일 공개 건수(auto-publish 커밋), 품질 보정 공개, 보류 건(hold Issue), 원본 소멸로
   내린 앵커(auto-publish 커밋의 unpublish 줄), 실행 실패 수를 Issue 1건으로 올린다.
 - Issue 본문에는 anchor_id·사유 코드·건수·실행 링크만 쓴다.
-- --dry-run: Issue를 만들지 않고 제목·본문만 출력한다.
+  새 주간 Issue를 만든 뒤 이전에 열려 있던 주간 요약 Issue는 번호만 적은 댓글을 남기고 닫는다
+  (새 Issue 생성이 실패하면 이전 Issue는 그대로 둔다).
+- --dry-run: Issue를 만들지 않고 제목·본문(과 닫을 이전 주간 Issue 번호)만 출력한다.
 """
 import argparse
 import json
@@ -100,11 +102,33 @@ def collect_weekly(now: datetime):
 
 
 def create_issue(title: str, body: str, label: str, dry_run: bool):
+    """새 Issue 번호 (dry-run이면 None)."""
     if dry_run:
         print(f"[dry-run] {title}\n{body}")
-        return
-    gh("issue", "create", "--title", title, "--body", body, "--label", label)
+        return None
+    url = gh("issue", "create", "--title", title, "--body", body, "--label", label).strip()
     print(f"Issue 생성: {title}")
+    return int(url.rstrip("/").rsplit("/", 1)[-1])
+
+
+def weekly_issues_to_close(open_numbers, new_number) -> list:
+    """열린 주간 요약 Issue 중 방금 만든 것을 뺀 나머지."""
+    return sorted(n for n in open_numbers if n != new_number)
+
+
+def close_comment(new_number: int) -> str:
+    return f"다음 주간 요약 #{new_number} 생성으로 자동 종료"
+
+
+def close_previous_weekly(new_number, dry_run: bool):
+    issues = json.loads(gh("issue", "list", "--label", LABEL_WEEKLY, "--state", "open",
+                           "--limit", "100", "--json", "number"))
+    for n in weekly_issues_to_close([i["number"] for i in issues], new_number):
+        if dry_run:
+            print(f"[dry-run] 이전 주간 요약 #{n} 닫기")
+            continue
+        gh("issue", "close", str(n), "--comment", close_comment(new_number))
+        print(f"이전 주간 요약 #{n} 닫음")
 
 
 def main():
@@ -128,8 +152,9 @@ def main():
     else:
         now = datetime.now(KST)
         start, published, quality, held, total, failed, vanished = collect_weekly(now)
-        create_issue(*weekly_issue(start, now, published, quality, held, total, failed, vanished),
-                     LABEL_WEEKLY, args.dry_run)
+        new_number = create_issue(*weekly_issue(start, now, published, quality, held, total, failed, vanished),
+                                  LABEL_WEEKLY, args.dry_run)
+        close_previous_weekly(new_number, args.dry_run)
 
 
 if __name__ == "__main__":

@@ -1,10 +1,12 @@
 """
-공개된 앵커 하나를 내린다: python scripts/unpublish_anchor.py <anchor_id> [--write]
+공개된 앵커를 내린다: python scripts/unpublish_anchor.py <anchor_id> [<anchor_id> ...] [--reason CODE] [--write]
 
 1. daily/ 파일에서 그 앵커 블록을 지운다 (다른 블록은 한 글자도 바꾸지 않고 번호만 다시 매김).
 2. anchor_count를 다시 계산한다. 남은 블록이 없으면 그 날짜 파일을 지운다.
 3. index.md "일자별 앵커" 표와 README.md 운영 현황 줄을 daily/ 전체 기준으로 다시 만든다.
 4. config/auto_publish_exclude.txt에 ID를 등록해 자동·수동 갱신이 다시 고르지 않게 한다.
+   --reason CODE를 주면 메모에 사유 코드를 남긴다 (예: SCOPE_TIGHTENED - direct 기준 강화로 내린 앵커,
+   나중에 direct-plus로 되살릴 때 이 코드로 골라낸다).
 
 기본은 dry-run(계획만 출력). --write일 때만 쓴다. 출력은 anchor_id·파일명·건수만.
 """
@@ -50,7 +52,7 @@ def add_exclude(path: Path, anchor_id: str, today: str, reason: str = "") -> boo
     return True
 
 
-def unpublish(anchor_id: str, repo_root: Path, write: bool, today: str = None) -> int:
+def unpublish(anchor_id: str, repo_root: Path, write: bool, today: str = None, reason: str = "") -> int:
     daily_dir = repo_root / "daily"
     today = today or datetime.now(KST).date().isoformat()
     exclude_path = repo_root / "config" / "auto_publish_exclude.txt"
@@ -92,7 +94,7 @@ def unpublish(anchor_id: str, repo_root: Path, write: bool, today: str = None) -
                                                                   repo_root / "README.md")
         (repo_root / "index.md").write_text(new_index, encoding="utf-8", newline="\n")
         (repo_root / "README.md").write_text(new_readme, encoding="utf-8", newline="\n")
-    add_exclude(exclude_path, anchor_id, today)
+    add_exclude(exclude_path, anchor_id, today, reason)
     print("쓰기 완료. git diff로 확인한 뒤 commit/push 하세요.")
     return 0
 
@@ -101,12 +103,20 @@ def main():
     sys.stdout.reconfigure(encoding="utf-8")
     sys.stderr.reconfigure(encoding="utf-8")
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("anchor_id", help="8자리 anchor_id")
+    parser.add_argument("anchor_ids", nargs="+", metavar="anchor_id", help="8자리 anchor_id (여러 개 가능)")
+    parser.add_argument("--reason", default="", help="exclude 메모에 남길 사유 코드 (대문자·숫자·밑줄)")
     parser.add_argument("--write", action="store_true", help="실제로 쓴다 (없으면 dry-run)")
     args = parser.parse_args()
-    if not re.fullmatch(r"[0-9a-f]{8}", args.anchor_id):
-        sys.exit("anchor_id는 8자리 16진수여야 합니다.")
-    sys.exit(unpublish(args.anchor_id, exporter.REPO_ROOT, args.write))
+    bad = [a for a in args.anchor_ids if not re.fullmatch(r"[0-9a-f]{8}", a)]
+    if bad:
+        sys.exit(f"anchor_id는 8자리 16진수여야 합니다: {len(bad)}건")
+    if args.reason and not re.fullmatch(r"[A-Z][A-Z0-9_]*", args.reason):
+        sys.exit("--reason은 대문자·숫자·밑줄로 된 사유 코드여야 합니다.")
+    # 여러 개면 하나씩 차례로 처리한다 (--write면 앞의 결과 위에서 다음 것을 계산).
+    for anchor_id in dict.fromkeys(args.anchor_ids):
+        rc = unpublish(anchor_id, exporter.REPO_ROOT, args.write, reason=args.reason)
+        if rc:
+            sys.exit(rc)
 
 
 if __name__ == "__main__":

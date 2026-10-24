@@ -62,7 +62,7 @@ INDUSTRY_VALUES = {"조선", "자동차", "에너지", "석유화학", "배터�
 TECH_VALUES = ["피지컬AI", "데이터센터", "디지털트윈", "자율제조", "로봇", "LLM", "에이전트"]
 
 GROUP_LABELS = {
-    "A": "A  울산 직접 관련",
+    "A": "A  울산 직접 관련 (제목 울산, 또는 region/ulsan_score + evidence·loc에 울산)",
     "B1": "B1 울산 주력산업·기업 (제목 키워드/core)",
     "B2": "B2 울산 주력산업 (제목 주력산업 키워드 없이 industries 값)",
     "C": "C  AX 핵심기술 참고사례",
@@ -202,8 +202,12 @@ def classify(fm: dict):
     # 웹앱이 다른 시·도 기사로 판정한 경우(신규 필드 region == 타지자체)는 제목에 주력산업
     # 단어가 있어도 B1(울산 주력산업·기업)로 보지 않는다 - 예: "광주·전남 ... 에너지" 기사.
     other_region = region == "타지자체"
+    # 제목에 울산이 없고 region/ulsan_score로만 A가 되는 경우는 evidence나 loc에 '울산'이 있어야 한다.
+    # 웹앱은 울산에 거점이 있는 기업(현대차·HD현대 등) 기사에 region=울산을 붙이는 일이 많아
+    # 실증·행사가 다른 지역·해외인 기사까지 A로 들어오던 것을 막는다. 아니면 B 계열로 내려간다.
+    ulsan_in_detail = any("울산" in str(fm.get(k) or "") for k in ("evidence", "loc"))
 
-    if t_ulsan or region_match or score_match:
+    if t_ulsan or ((region_match or score_match) and ulsan_in_detail):
         group = "A"
     elif (t_industry or core_match) and not other_region:
         group = "B1"

@@ -338,3 +338,31 @@ def test_unpublish_writes_index_readme_exclude(tmp_path, capsys):
     assert unpublish_anchor.unpublish("c0000002", repo, write=True) == 0  # 마지막 블록 -> 파일 삭제
     assert not (repo / "daily" / f"{DATE}.md").exists()
     assert "제목 c0000001" not in capsys.readouterr().out
+
+
+def test_unpublish_reason_code_in_exclude(tmp_path):
+    repo = make_repo(tmp_path)
+    (repo / "daily" / f"{DATE}.md").write_text(
+        exporter.render_daily(DATE, [_anchor("c0000001"), _anchor("c0000002")]), encoding="utf-8", newline="\n")
+    assert unpublish_anchor.unpublish("c0000001", repo, write=True, today="2026-10-24",
+                                      reason="SCOPE_TIGHTENED") == 0
+    exclude = (repo / "config" / "auto_publish_exclude.txt").read_text(encoding="utf-8")
+    assert "c0000001  # unpublished 2026-10-24 SCOPE_TIGHTENED" in exclude
+
+
+def test_region_only_needs_ulsan_in_evidence_or_loc():
+    sel = exporter.selector
+    base = {"title": "현대차 자율주행 트럭 실증", "industries": ["자동차"], "region": "울산", "ulsan_score": 8, "core": 1}
+    assert sel.classify(base)[0] == "B1"
+    assert sel.classify({**base, "evidence": "현대차-자율트럭-울산물류노선"})[0] == "A"
+    assert sel.classify({**base, "loc": "울산 북구"})[0] == "A"
+    assert sel.classify({**base, "evidence": "현대차-자율트럭-화성시", "core": 0})[0] == "B1"  # 제목 기업 키워드
+    assert sel.classify({**base, "title": "울산 공장 AI 전환"})[0] == "A"  # 제목 울산은 그대로 A
+
+
+def test_weekly_closes_only_previous_issues():
+    assert notify.weekly_issues_to_close([1, 5, 9], 9) == [1, 5]
+    assert notify.weekly_issues_to_close([3], None) == [3]  # dry-run: 새 Issue 없음
+    assert notify.weekly_issues_to_close([], 4) == []
+    assert notify.close_comment(12) == "다음 주간 요약 #12 생성으로 자동 종료"
+    assert_no_leak(notify.close_comment(12))

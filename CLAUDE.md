@@ -34,7 +34,8 @@
 | `scripts/unpublish_anchor.py` | 공개 앵커 하나 내리기: 블록 제거 → 번호·anchor_count·index·README 재계산 → exclude 등록 |
 | `config/auto_publish_exclude.txt` | 공개 철회 ID. 자동·수동 갱신 모두 다시 고르지 않음 |
 
-- 분류: A=울산 직접(제목 울산/UNIST/울산대, region=울산, ulsan_score>0), B1=제목 산업·기업
+- 분류: A=울산 직접(제목 울산/UNIST/울산대, 또는 region=울산·ulsan_score>0이면서 evidence·loc에
+  '울산'이 있을 때 - 2026-10-24 강화, 아니면 B 계열로 내려감), B1=제목 산업·기업
   키워드 또는 core=1(단 region=타지자체 제외), B2=industries만 일치, C=AX 기술, D=기타.
   scope: direct=A, direct-plus=A+B1, topics=C, all.
 - 요약 모델: `--model` > `AX_SUMMARY_MODEL` > 기본 `claude-sonnet-5`. CI에서는 저장소 Variable `AX_SUMMARY_MODEL`.
@@ -65,8 +66,12 @@
   공개·내림 모두 0건이면 커밋 안 함. 작성자 github-actions[bot].
 - 알림(Issue): 새 보류 ID가 있으면 `auto-publish-hold`(열린 hold Issue에 이미 있는 ID는 제외),
   실행 실패 시 `auto-publish-failure`(사유 코드가 있으면 함께), 주간 요약 `auto-publish-weekly`
-  (공개·품질 보정·보류·"원본 소멸로 내림: ID"·실행 실패).
-- 앵커 내리기: `python scripts/unpublish_anchor.py <id>`(dry-run) → `--write` → git diff 확인 → commit/push.
+  (공개·품질 보정·보류·"원본 소멸로 내림: ID"·실행 실패). 새 주간 요약을 만든 뒤 이전에 열린 주간
+  요약 Issue는 "다음 주간 요약 #N 생성으로 자동 종료" 댓글과 함께 닫는다(생성 실패 시 닫지 않음).
+- 앵커 내리기: `python scripts/unpublish_anchor.py <id> [<id> ...] [--reason CODE]`(dry-run) → `--write`
+  → git diff 확인 → commit/push. `--reason`은 exclude 메모 끝에 붙는 사유 코드.
+  `SCOPE_TIGHTENED` = direct 기준 강화(10-24)로 내린 앵커. direct-plus로 넓힐 때 이 코드의 줄만
+  exclude에서 지우면 다시 후보가 된다.
   exclude에 등록되므로 다음 자동 실행이 다시 공개하지 않는다. 보류 Issue의 앵커를 영구히 빼려면
   exclude 파일에 ID만 추가한다. `git revert`만 하면 다음 날 다시 공개되니 쓰지 않는다.
 
