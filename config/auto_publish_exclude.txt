@@ -94,3 +94,6 @@ e661bd05  # unpublished 2026-10-24 SCOPE_TIGHTENED
 ecafca49  # unpublished 2026-10-24 SCOPE_TIGHTENED
 a93fcec0  # unpublished 2026-10-29 SOURCE_VANISHED
 8e51eade  # unpublished 2026-10-30 SOURCE_VANISHED
+12817247  # unpublished 2026-10-31 SOURCE_VANISHED
+7efbe8cb  # unpublished 2026-10-31 SOURCE_VANISHED
+d5886d00  # unpublished 2026-10-31 SOURCE_VANISHED
